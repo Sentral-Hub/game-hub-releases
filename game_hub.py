@@ -63,9 +63,9 @@ DATA_FILE = os.path.join(DATA_DIR, "library.json")
 ART_DIR = os.path.join(DATA_DIR, "covers")
 UA = "GameHub/1.0 (personal game library app)"
 ART_VERSION = 2   # bump to re-fetch art (v2 added hero banners + logos)
-VERSION = "0.020"
+VERSION = "0.021"
 DEFAULT_UPDATE_URL = __import__("base64").b64decode("aHR0cHM6Ly9naXRodWIuY29tL1NlbnRyYWwtSHViL2dhbWUtaHViLXJlbGVhc2VzL2Jsb2IvbWFpbi9nYW1lX2h1Yi5weQ==").decode()
-WHATS_NEW = "A new installer with options and progress, an Install button in Settings, and Windows always shows the version you have."
+WHATS_NEW = "Fixes Game Hub freezing and crashing when you close its window. Problems are now recorded in a crash log."
 PID_FILE = os.path.join(DATA_DIR, "running.pid")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APPDATA), "Programs", "Game Hub")
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\GameHub"
@@ -2408,24 +2408,25 @@ class App:
 
     # ---------- window / tray
     def _on_closing(self):
+        # Windows waits for this answer before doing anything else, so answer at once and never touch
+        # the window from in here (doing so made both sides wait for each other and froze the app).
         if self._tray and not self._quitting and self._data["settings"].get("close_to_tray", True):
-            self._sleep(True)
-            self._window.hide()
+            threading.Thread(target=self._to_tray, daemon=True).start()
             return False
         return True
 
+    def _to_tray(self):
+        time.sleep(0.15)          # let Windows finish handling the close first
+        try:
+            self._window.hide()
+        except Exception as e:
+            log_problem("hiding the window", e)
+        self._sleep(True)
+
     def _sleep(self, on):
-        """In the tray: let the window drop its pictures and ask WebView2 to trim memory."""
+        """In the tray: let the window drop its pictures while nobody's looking."""
         try:
             self._window.evaluate_js(f"window.sleepMode&&sleepMode({'true' if on else 'false'})")
-        except Exception:
-            pass
-        try:  # WebView2 memory target (best effort; ignored where unsupported)
-            from Microsoft.Web.WebView2.Core import CoreWebView2MemoryUsageTargetLevel as Level
-            import System
-            form = self._window.native
-            core = form.webview.CoreWebView2
-            form.Invoke(System.Action(lambda: setattr(core, "MemoryUsageTargetLevel", Level.Low if on else Level.Normal)))
         except Exception:
             pass
 
@@ -2442,18 +2443,22 @@ class App:
         threading.Thread(target=self._tray.run, daemon=True).start()
 
     def _show(self):
-        if self._window:
+        if not self._window:
+            return
+        try:
             self._window.show()
-            self._sleep(False)
-            try:
-                self._window.restore()
-            except Exception:
-                pass
+            self._window.restore()
+        except Exception as e:
+            log_problem("showing the window", e)
+        self._sleep(False)
 
     def _quit(self):
         self._quitting = True
         if self._window:
-            self._window.destroy()
+            try:
+                self._window.destroy()
+            except Exception as e:
+                log_problem("closing the window", e)
 
     def _shutdown(self):
         self._quitting = True
@@ -4675,7 +4680,40 @@ def uninstall():
     w.root.mainloop()
 
 
+CRASH_LOG = os.path.join(DATA_DIR, "crash.log")
+_crash_file = None
+
+
+def log_problem(what, exc=None):
+    try:
+        import traceback
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(CRASH_LOG, "a", encoding="utf-8") as f:
+            f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Game Hub {VERSION}: problem {what}\n")
+            if exc is not None:
+                f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+    except Exception:
+        pass
+
+
+def setup_crash_log():
+    """Record crashes and errors in %APPDATA%\\GameHub\\crash.log (kept small)."""
+    global _crash_file
+    try:
+        import faulthandler
+        os.makedirs(DATA_DIR, exist_ok=True)
+        if os.path.isfile(CRASH_LOG) and os.path.getsize(CRASH_LOG) > 256_000:
+            os.replace(CRASH_LOG, CRASH_LOG + ".old")
+        _crash_file = open(CRASH_LOG, "a", encoding="utf-8")
+        faulthandler.enable(file=_crash_file, all_threads=True)   # hard crashes inside Windows code too
+    except Exception:
+        pass
+    sys.excepthook = lambda t, e, tb: log_problem("that wasn't handled", e)
+    threading.excepthook = lambda a: log_problem(f"in background task {getattr(a.thread, 'name', '')}", a.exc_value)
+
+
 def main():
+    setup_crash_log()
     refresh_install_record()
     if "--install" in sys.argv:
         return install()
@@ -4690,8 +4728,14 @@ def main():
                                    min_size=(980, 620), background_color="#0a0c11", hidden=minimized)
     app._window = window
     window.events.closing += app._on_closing
-    webview.start()
-    app._shutdown()
+    try:
+        webview.start()
+    except Exception as e:
+        log_problem("running the window", e)
+    try:
+        app._shutdown()
+    except Exception as e:
+        log_problem("saving on exit", e)
     if app._relaunch:  # finished updating: start the new version
         subprocess.Popen(app._relaunch, cwd=os.path.dirname(os.path.abspath(__file__)),
                          creationflags=getattr(subprocess, "DETACHED_PROCESS", 0) | NO_WINDOW)
