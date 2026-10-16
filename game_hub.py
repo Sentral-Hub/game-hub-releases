@@ -22,6 +22,8 @@ import glob
 import hashlib
 import html as htmllib
 import json
+import platform
+import struct
 import mimetypes
 import os
 import re
@@ -63,9 +65,9 @@ DATA_FILE = os.path.join(DATA_DIR, "library.json")
 ART_DIR = os.path.join(DATA_DIR, "covers")
 UA = "GameHub/1.0 (personal game library app)"
 ART_VERSION = 2   # bump to re-fetch art (v2 added hero banners + logos)
-VERSION = "0.021"
+VERSION = "0.022"
 DEFAULT_UPDATE_URL = __import__("base64").b64decode("aHR0cHM6Ly9naXRodWIuY29tL1NlbnRyYWwtSHViL2dhbWUtaHViLXJlbGVhc2VzL2Jsb2IvbWFpbi9nYW1lX2h1Yi5weQ==").decode()
-WHATS_NEW = "Fixes Game Hub freezing and crashing when you close its window. Problems are now recorded in a crash log."
+WHATS_NEW = "Game Hub now shows as Game Hub, with its own icon, in Task Manager and on the taskbar, instead of as Python."
 PID_FILE = os.path.join(DATA_DIR, "running.pid")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APPDATA), "Programs", "Game Hub")
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\GameHub"
@@ -1431,9 +1433,12 @@ def startup_file():
 
 
 def gui_python():
-    """pythonw.exe next to the running interpreter (no console window)."""
-    w = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-    return w if os.path.isfile(w) else sys.executable
+    """pythonw.exe of the real Python install (no console window)."""
+    for d in (sys.base_prefix, os.path.dirname(sys.executable)):
+        w = os.path.join(d, "pythonw.exe")
+        if os.path.isfile(w):
+            return w
+    return sys.executable
 
 
 def set_startup(on, script=None):
@@ -3860,6 +3865,9 @@ PACKAGES = ["pywebview", "pystray", "pillow"]
 
 def _console_python():
     """The python.exe that belongs to whatever interpreter is running us (pip needs the console one)."""
+    base = os.path.join(sys.base_prefix, "python.exe")
+    if in_runtime() and os.path.isfile(base):
+        return base                 # install packages into the real Python, not Game Hub's process copy
     exe = sys.executable
     if exe.lower().endswith("pythonw.exe"):
         alt = exe[:-len("pythonw.exe")] + "python.exe"
@@ -3966,6 +3974,216 @@ def clear_scan_caches():
     _steam_root = None
     _epic_cat = None
     _epic_items.clear()
+
+
+# ======================================================================= Game Hub's own process
+# Windows shows a program by its file's name and icon. Game Hub runs on Python, so it showed as "Python".
+# Game Hub makes its own copy of Python's pythonw.exe named "Game Hub.exe", gives it Game Hub's name and icon,
+# and runs through it. It still uses your installed Python and packages (pyvenv.cfg points back to them).
+RUNTIME_ROOT = os.path.join(os.environ.get("LOCALAPPDATA", DATA_DIR), "GameHub", "runtime")
+RUNTIME_REV = 1          # bump to rebuild everyone's copy
+
+
+def in_runtime():
+    exe = os.path.normcase(os.path.abspath(sys.executable))
+    return exe.startswith(os.path.normcase(RUNTIME_ROOT)) and os.path.basename(exe) == "game hub.exe"
+
+
+def _vs_node(key, value=b"", wtype=1, vlen=0, children=()):
+    """One VS_VERSIONINFO block: header, key, padding, value, padding, children (each 32-bit aligned)."""
+    out = bytearray(struct.pack("<HHH", 0, vlen, wtype) + (key + "\0").encode("utf-16-le"))
+    out += b"\0" * (-len(out) % 4)
+    out += value
+    out += b"\0" * (-len(out) % 4)
+    for c in children:
+        out += c
+        out += b"\0" * (-len(out) % 4)
+    struct.pack_into("<H", out, 0, len(out))
+    return bytes(out)
+
+
+def version_resource(name="Game Hub", version="1.0.0.0"):
+    nums = ([int(x) for x in re.findall(r"\d+", version)] + [0, 0, 0, 0])[:4]
+    ms, ls = (nums[0] << 16) | nums[1], (nums[2] << 16) | nums[3]
+    fixed = struct.pack("<13I", 0xFEEF04BD, 0x00010000, ms, ls, ms, ls, 0x3F, 0, 0x00040004, 1, 0, 0, 0)
+    strings = [("CompanyName", name), ("FileDescription", name), ("FileVersion", version), ("InternalName", name),
+               ("LegalCopyright", ""), ("OriginalFilename", name + ".exe"), ("ProductName", name),
+               ("ProductVersion", version)]
+    table = _vs_node("040904B0", children=[_vs_node(k, (v + "\0").encode("utf-16-le"), 1, len(v) + 1) for k, v in strings])
+    return _vs_node("VS_VERSION_INFO", fixed, 0, len(fixed), [
+        _vs_node("StringFileInfo", children=[table]),
+        _vs_node("VarFileInfo", children=[_vs_node("Translation", struct.pack("<HH", 0x0409, 0x04B0), 0, 4)])])
+
+
+def icon_resources(ico):
+    """(group bytes, [(id, image bytes)]) for an .ico file, in the layout Windows programs store icons."""
+    _, kind, count = struct.unpack_from("<HHH", ico, 0)
+    if kind != 1 or not count:
+        raise ValueError("not an icon file")
+    entries, images = [], []
+    for i in range(count):
+        w, h, colors, res, planes, bits, size, offset = struct.unpack_from("<BBBBHHII", ico, 6 + 16 * i)
+        images.append((i + 1, ico[offset:offset + size]))
+        entries.append(struct.pack("<BBBBHHIH", w, h, colors, res, planes or 1, bits or 32, size, i + 1))
+    return struct.pack("<HHH", 0, 1, count) + b"".join(entries), images
+
+
+def strip_signature(path):
+    """Drop the publisher signature (it no longer matches once the name and icon are changed)."""
+    with open(path, "r+b") as f:
+        data = bytearray(f.read())
+        pe = struct.unpack_from("<I", data, 0x3C)[0]
+        opt = pe + 24
+        dirs = opt + (112 if struct.unpack_from("<H", data, opt)[0] == 0x20B else 96)
+        off, size = struct.unpack_from("<II", data, dirs + 4 * 8)
+        if off and size and off + size <= len(data):
+            struct.pack_into("<II", data, dirs + 4 * 8, 0, 0)
+            if off + size >= len(data) - 8:
+                del data[off:]
+            f.seek(0)
+            f.write(data)
+            f.truncate()
+
+
+def set_exe_resources(path, version_blob, group, images):
+    """Replace a program's icon and name using Windows' own resource-editing functions."""
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.LoadLibraryExW.restype = ctypes.c_void_p
+    k32.BeginUpdateResourceW.restype = ctypes.c_void_p
+    k32.FreeLibrary.argtypes = [ctypes.c_void_p]
+    rid = lambda n: ctypes.c_void_p(n) if isinstance(n, int) else ctypes.c_wchar_p(n)
+    NAMES = ctypes.WINFUNCTYPE(wintypes.BOOL, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+    LANGS = ctypes.WINFUNCTYPE(wintypes.BOOL, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, wintypes.WORD, ctypes.c_void_p)
+    old = []
+    h = k32.LoadLibraryExW(path, None, 0x2 | 0x20)   # as data / as image resource: nothing is run
+    if h:
+        try:
+            for rtype in (3, 14, 16):                  # icons, icon groups, version info
+                names = []
+                cbn = NAMES(lambda hm, t, n, p: names.append(n if (n or 0) >> 16 == 0 else ctypes.wstring_at(n)) or True)
+                k32.EnumResourceNamesW(ctypes.c_void_p(h), ctypes.c_void_p(rtype), cbn, None)
+                for n in names:
+                    langs = []
+                    cbl = LANGS(lambda hm, t, nn, lang, p: langs.append(lang) or True)
+                    k32.EnumResourceLanguagesW(ctypes.c_void_p(h), ctypes.c_void_p(rtype), rid(n), cbl, None)
+                    old += [(rtype, n, l) for l in langs]
+        finally:
+            k32.FreeLibrary(h)
+    hu = k32.BeginUpdateResourceW(path, False)
+    if not hu:
+        raise OSError(f"Windows couldn't open the file for editing ({ctypes.get_last_error()})")
+    ok = True
+
+    def put(rtype, name, lang, data):
+        nonlocal ok
+        buf = ctypes.create_string_buffer(data, len(data)) if data else None
+        ok &= bool(k32.UpdateResourceW(ctypes.c_void_p(hu), ctypes.c_void_p(rtype), rid(name), wintypes.WORD(lang),
+                                       buf, wintypes.DWORD(len(data) if data else 0)))
+    for rtype, n, lang in old:
+        put(rtype, n, lang, None)                      # remove Python's icon and name
+    for i, img in images:
+        put(3, i, 0x0409, img)
+    if group:
+        put(14, 1, 0x0409, group)
+    put(16, 1, 0x0409, version_blob)
+    if not k32.EndUpdateResourceW(ctypes.c_void_p(hu), not ok):
+        raise OSError(f"Windows couldn't save the new icon and name ({ctypes.get_last_error()})")
+    if not ok:
+        raise OSError("Windows refused part of the icon and name change")
+
+
+def _runtime_stamp():
+    home = sys.base_prefix
+    src = os.path.join(home, "pythonw.exe")
+    dll = os.path.join(home, f"python{sys.version_info[0]}{sys.version_info[1]}.dll")
+    if not (os.path.isfile(src) and os.path.isfile(dll)):
+        return None
+    return {"rev": RUNTIME_REV, "home": os.path.normcase(home), "exe": os.path.getmtime(src), "dll": os.path.getmtime(dll)}
+
+
+def ensure_runtime():
+    """Path to Game Hub's own process file, building it if needed. None if this PC can't use one."""
+    if os.name != "nt":
+        return None
+    stamp = _runtime_stamp()
+    if not stamp:
+        return None                     # e.g. Python from the Microsoft Store: can't be copied
+    tag = hashlib.sha1(json.dumps(stamp, sort_keys=True).encode()).hexdigest()[:10]
+    folder = os.path.join(RUNTIME_ROOT, tag)
+    exe = os.path.join(folder, "Game Hub.exe")
+    marker = os.path.join(folder, "runtime.json")
+    try:
+        info = json.load(open(marker))
+        if os.path.isfile(exe):
+            return None if info.get("broken") else exe
+    except (OSError, ValueError):
+        pass
+    home = sys.base_prefix
+    tmp = folder + ".building"
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
+    dll = f"python{sys.version_info[0]}{sys.version_info[1]}.dll"
+    for name in ("python3.dll", dll, "vcruntime140.dll", "vcruntime140_1.dll"):
+        if os.path.isfile(os.path.join(home, name)):
+            shutil.copy2(os.path.join(home, name), tmp)
+    new = os.path.join(tmp, "Game Hub.exe")
+    shutil.copy2(os.path.join(home, "pythonw.exe"), new)
+    strip_signature(new)
+    ico = make_icon(os.path.join(tmp, "game_hub.ico"))
+    group, images = icon_resources(open(ico, "rb").read()) if ico else (None, [])
+    set_exe_resources(new, version_resource(), group, images)
+    with open(os.path.join(tmp, "pyvenv.cfg"), "w") as f:
+        f.write(f"home = {home}\ninclude-system-site-packages = true\nversion = {platform.python_version()}\n")
+    with open(os.path.join(tmp, "runtime.json"), "w") as f:
+        json.dump({"stamp": stamp}, f)
+    os.replace(tmp, folder)
+    for old in os.listdir(RUNTIME_ROOT):   # older copies (a previous Python); skipped if still in use
+        if old != tag and not old.endswith(".building"):
+            shutil.rmtree(os.path.join(RUNTIME_ROOT, old), ignore_errors=True)
+    return exe
+
+
+def handoff_to_runtime():
+    """Start Game Hub inside its own process copy. True if that took over (this process should exit)."""
+    if os.name != "nt" or in_runtime() or os.environ.get("GAMEHUB_PLAIN_PYTHON"):
+        return False
+    try:
+        exe = ensure_runtime()
+    except Exception as e:
+        log_problem("preparing Game Hub's own process", e)
+        return False
+    if not exe:
+        return False
+    try:
+        child = subprocess.Popen([exe, os.path.abspath(__file__)] + sys.argv[1:],
+                                 cwd=os.path.dirname(os.path.abspath(__file__)))
+        code = child.wait(timeout=3)        # a broken copy fails straight away
+    except subprocess.TimeoutExpired:
+        return True                         # it's running: hand over
+    except Exception as e:
+        log_problem("starting Game Hub's own process", e)
+        return False
+    if code == 0:
+        return True
+    log_problem(f"Game Hub's own process exited with code {code}; using plain Python from now on")
+    try:
+        marker = os.path.join(os.path.dirname(exe), "runtime.json")
+        info = json.load(open(marker))
+        info["broken"] = True
+        json.dump(info, open(marker, "w"))
+    except Exception:
+        pass
+    return False
+
+
+def set_app_id():
+    """Group Game Hub's taskbar button as its own app (with its own icon), not as Python."""
+    if os.name == "nt":
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("GameHub.App")
+        except Exception:
+            pass
 
 
 # ======================================================================= friends
@@ -4354,7 +4572,11 @@ def make_icon(path):
         d = _Dr.Draw(img)
         d.rounded_rectangle((8, 8, 248, 248), 60, fill=(124, 92, 255, 255))
         d.polygon([(98, 70), (98, 186), (190, 128)], fill=(255, 255, 255, 255))
-        img.save(path, sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+        sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+        try:
+            img.save(path, sizes=sizes, bitmap_format="bmp")   # classic format: works everywhere in Windows
+        except (TypeError, ValueError, OSError):
+            img.save(path, sizes=sizes)
         return path
     except Exception:
         return ""
@@ -4719,8 +4941,13 @@ def main():
         return install()
     if "--uninstall" in sys.argv:
         return uninstall()
+    if in_runtime() and webview is None:
+        sys.exit(3)                 # can't see the packages from here: let the normal start use plain Python
     if not ensure_packages():
         return
+    if handoff_to_runtime():
+        return                      # Game Hub is now running as "Game Hub" in Task Manager
+    set_app_id()
     app = App()
     app._start_tray()
     minimized = "--minimized" in sys.argv and app._tray is not None
