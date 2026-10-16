@@ -65,9 +65,9 @@ DATA_FILE = os.path.join(DATA_DIR, "library.json")
 ART_DIR = os.path.join(DATA_DIR, "covers")
 UA = "GameHub/1.0 (personal game library app)"
 ART_VERSION = 2   # bump to re-fetch art (v2 added hero banners + logos)
-VERSION = "0.024"
+VERSION = "0.025"
 DEFAULT_UPDATE_URL = __import__("base64").b64decode("aHR0cHM6Ly9naXRodWIuY29tL1NlbnRyYWwtSHViL2dhbWUtaHViLXJlbGVhc2VzL2Jsb2IvbWFpbi9nYW1lX2h1Yi5weQ==").decode()
-WHATS_NEW = "Smaller, faster updates: Game Hub now downloads updates compressed, skips the download when nothing has changed, and keeps fewer leftover files on your PC."
+WHATS_NEW = "More personality: a greeting on Home, badges your games earn from play time, a Miss these? row for old favorites, and livelier loading, toasts and favorites."
 PID_FILE = os.path.join(DATA_DIR, "running.pid")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APPDATA), "Programs", "Game Hub")
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\GameHub"
@@ -2937,6 +2937,40 @@ tr.row .more{opacity:.5}
 .hdot{width:26px;height:4px;border-radius:4px;border:0;padding:0;background:rgba(255,255,255,.28);cursor:pointer;transition:width .25s,background .25s}
 .hdot:hover{background:rgba(255,255,255,.55)}
 .hdot.on{width:46px;background:#fff}
+/* personality */
+.title .greet{display:block;font-family:"Segoe UI Variable Text","Segoe UI",sans-serif;font-stretch:normal;font-size:13px;font-weight:500;color:rgba(255,255,255,.55);letter-spacing:0;text-shadow:none;margin-top:2px}
+.title .greet b{color:#fff;font-weight:600}
+.badges{display:flex;flex-wrap:wrap;gap:6px}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:4px 9px 4px 7px;border-radius:99px;font-size:11.5px;font-weight:600;letter-spacing:.2px;background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.12);white-space:nowrap}
+.badge i{font-style:normal;font-size:12px;line-height:1}
+.badge.gold{background:linear-gradient(135deg,rgba(251,191,36,.28),rgba(245,158,11,.12));border-color:rgba(251,191,36,.45);color:#fde68a}
+.badge.hot{background:linear-gradient(135deg,rgba(248,113,113,.28),rgba(244,63,94,.1));border-color:rgba(248,113,113,.45);color:#fecaca}
+.badge.new{background:linear-gradient(135deg,rgba(52,211,153,.25),rgba(16,185,129,.08));border-color:rgba(52,211,153,.4);color:#a7f3d0}
+.badge.dust{background:rgba(148,163,184,.14);border-color:rgba(148,163,184,.3);color:#cbd5e1}
+.badge.owl{background:linear-gradient(135deg,rgba(124,92,255,.3),rgba(34,211,238,.1));border-color:rgba(124,92,255,.5);color:#ddd6fe}
+.hero-badges{margin:-10px 0 22px}
+.d-badges{margin:2px 0 16px}
+.sp-quip{margin-top:8px;font-size:12.5px;color:rgba(255,255,255,.4);font-style:italic;min-height:18px;transition:opacity .35s}
+.sp-quip.out{opacity:0}
+.side-stats .fun{display:block;margin-top:2px;color:rgba(255,255,255,.3);font-size:11px;font-style:italic}
+.empty .eic{width:74px;height:74px;border-radius:24px;display:grid;place-items:center;margin-bottom:18px;background:linear-gradient(135deg,rgba(124,92,255,.22),rgba(34,211,238,.08));border:1px solid rgba(124,92,255,.3);box-shadow:0 18px 50px -20px rgba(124,92,255,.8);transform:rotate(-6deg)}
+.empty .eic svg{width:32px;height:32px;stroke:#c4b5fd}
+.empty b{font-family:var(--display);font-stretch:condensed;font-size:22px}
+.empty span{max-width:380px;line-height:1.5}
+.burst{position:fixed;width:0;height:0;pointer-events:none;z-index:60}
+.burst i{position:absolute;left:-3px;top:-3px;width:6px;height:6px;border-radius:50%;background:#fbbf24;animation:burst .6s cubic-bezier(.2,.7,.3,1) forwards}
+.burst i:nth-child(even){background:#c4b5fd;width:5px;height:5px}
+@keyframes burst{0%{transform:translate(0,0) scale(1);opacity:1}100%{transform:translate(var(--x),var(--y)) scale(.3);opacity:0}}
+.btn.go{position:relative;overflow:hidden}
+.btn.go::after{content:"";position:absolute;inset:0;background:linear-gradient(105deg,transparent 35%,rgba(255,255,255,.35) 50%,transparent 65%);transform:translateX(-120%);pointer-events:none}
+.btn.go:hover::after{transform:translateX(120%);transition:transform .7s ease}
+.btn.go:active{transform:scale(.97)}
+.brand .logo{transition:transform .25s cubic-bezier(.3,1.6,.5,1),background 1s}
+.brand:hover .logo{transform:rotate(-10deg) scale(1.08)}
+.toast{display:flex;align-items:center;gap:9px}
+.toast .ti{font-size:15px;line-height:1}
+.toast.on{animation:toastin .38s cubic-bezier(.3,1.5,.5,1)}
+@keyframes toastin{0%{transform:translate(-50%,24px) scale(.94)}100%{transform:translate(-50%,0) scale(1)}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important}}
 </style></head>
 <body>
@@ -2959,6 +2993,7 @@ tr.row .more{opacity:.5}
   <div class="sp-title">Game Hub</div>
   <div class="sp-bar"><i id="spFill"></i></div>
   <div class="sp-text" id="spText">Starting up…</div>
+  <div class="sp-quip" id="spQuip"></div>
   <button class="sp-skip" id="spSkip">Skip and open now</button>
 </div></div>
 <script>
@@ -3108,7 +3143,7 @@ function renderSide(){
   h+=`<div class="side-bottom">${updNote}<div class="side-stats">
       <div><b>${fmtSize(sum('size'))}</b>on disk</div>
       <div><b>${fmtTime(sum('recent'))}</b>played in the last 2 weeks</div>
-      <div><b>${fmtTime(sum('total'))}</b>played in total</div></div>`;
+      <div><b>${fmtTime(sum('total'))}</b>played in total${funTotal(sum('total'))?`<span class="fun">${funTotal(sum('total'))}</span>`:''}</div></div>`;
   h+=`<div class="side-foot"><span class="pulse ${tracking?'':'off'}"></span><span>${!tracking?'Tracking paused':playing.length?'Playing '+esc(playing[0].name):'Tracking play time'}</span></div></div>`;
   $('#side').innerHTML=h;
 }
@@ -3125,8 +3160,10 @@ function renderTop(){
   const sorts=SORTS; void [['name','Name A–Z'],['recent','Recently played'],['most','Most played'],['fortnight','Played in the last 2 weeks'],['size','Size on disk'],['launcher','Launcher']];
   const focused=document.activeElement&&document.activeElement.id==='q';
   const sub=k==='friends'?(friendsOnline()===null?'':`${friendsOnline()} online`):`${n} game${n===1?'':'s'}`;
-  if(focused){ $('#ttl').innerHTML=`${esc(title)}<small>${sub}</small>`; return; }
-  $('#top').innerHTML=`<div class="title" id="ttl">${esc(title)}<small>${sub}</small></div>
+  const homeTop=k==='all'&&!S.q.trim()&&S.data.games.length;
+  const ttl=homeTop?`${esc(S.greet||(S.greet=greeting()))}<span class="greet">${homeLine(S.data.games.filter(g=>!g.hidden&&g.installed!==false))}</span>`:`${esc(title)}<small>${sub}</small>`;
+  if(focused){ $('#ttl').innerHTML=ttl; return; }
+  $('#top').innerHTML=`<div class="title" id="ttl">${ttl}</div>
     <div class="search">${ic('search')}<input id="q" placeholder="${k==='friends'?'Search friends…':'Search your games…'}  ( / )" value="${esc(S.q)}"></div>
     ${k==='all'||k==='friends'?'':`<div class="sortgrp"><button class="btn sortbtn" data-act="sortmenu" ${k==='recent'?'disabled':''}>${ic('sort')}<span>${esc((sorts.find(x=>x[0]===curSort())||sorts[0])[1])}</span>${ic('down')}</button><button class="btn icon dirbtn" data-act="sortdir" title="${esc(DIRS[curSort()][S.rev?1:0])} (click to flip)" aria-label="Sort direction: ${esc(DIRS[curSort()][S.rev?1:0])}">${ic(S.rev?'sortup':'sortdown')}</button></div>
     <div class="seg"><button data-mode="grid" class="${S.mode==='grid'?'on':''}" title="Grid">${ic('grid')}</button><button data-mode="list" class="${S.mode==='list'?'on':''}" title="List">${ic('list')}</button></div>`}
@@ -3150,7 +3187,7 @@ function card(g){
       <div class="sub"><span class="dot" style="background:${lc(g.launcher)}"></span>${esc(g.launcher)}${playLabel(g)?`<span class="sep">·</span>${playLabel(g)}`:''}</div></div></div>`; }
 
 function wcard(g, info='ago'){
-  const right = info==='ago' ? fmtAgo(g.last,g.playing)
+  const right = info==='ago' ? fmtAgo(g.last,g.playing) : info==='dust' ? longAgo(g.last)
     : `<span class="lchip"><span class="dot" style="background:${lc(g.launcher)}"></span>${esc(g.launcher)}${playLabel(g)?' · '+playLabel(g):''}</span>`;
   return `<div class="wcard" data-open="${esc(g.id)}">
     <div class="cover wide" data-cover="${esc(g.id)}">${tile(g)}${g.playing?'<span class="live"><i></i>Playing</span>':''}${updBadge(g)}${starBtn(g)}
@@ -3189,6 +3226,8 @@ function renderContent(){
       if(rec.length) h+=slider('Jump back in','recent',null,rec.map(g=>wcard(g,'ago')).join(''),'wides');
       const favs=list.filter(g=>g.fav);
       if(favs.length) h+=slider('Favorites','fav',favs.length,favs.slice(0,20).map(g=>wcard(g,'info')).join(''),'wides');
+      const dust=vis.filter(g=>g.installed!==false&&!g.playing&&g.total>=3600&&daysSince(g.last)>=60).sort((a,b)=>b.total-a.total).slice(0,10);
+      if(dust.length>=2) h+=slider('Miss these?','recent',null,dust.map(g=>wcard(g,'dust')).join(''),'wides');
       if(list.length){
         const shown=list.slice(0,30);
         const more=list.length>shown.length?`<div class="seeall" data-nav="games"><span>${ic('right')}</span>See all ${list.length} games</div>`:'';
@@ -3197,8 +3236,15 @@ function renderContent(){
       $('#content').innerHTML=h; initSliders(); renderHero(); return;
     }
     if(!list.length){
-      h+= d.games.length ? `<div class="empty"><b>Nothing here yet</b>${S.q?'No games match your search.':S.view.k==='recent'?'Play something and it will show up here.':S.view.k==='uninstalled'?'No uninstalled games found.':'Try another view.'}</div>`
-        : `<div class="empty"><b>No installed games found</b>Click <i>Add game</i> to add one by hand, or Rescan after installing a launcher.</div>`;
+      const E=(icon,b,t)=>`<div class="empty"><div class="eic">${ic(icon)}</div><b>${b}</b><span>${t}</span></div>`, k=S.view.k;
+      h+= !d.games.length ? E('pad','The shelf is empty','No installed games turned up. Click <i>Add game</i> to add one by hand, or Rescan after installing a launcher.')
+        : S.q ? E('search',`No luck with “${esc(S.q.trim())}”`,'Check the spelling, or try part of the name.')
+        : k==='recent' ? E('clock','Nothing played yet','Pick something and hit Play. It’ll show up here.')
+        : k==='fav' ? E('star','No favorites yet','Tap the star on any game you love and it’ll live here.')
+        : k==='updates' ? E('download','All caught up','Every game is up to date. Go play something.')
+        : k==='uninstalled' ? E('trash','Nothing uninstalled','Games you remove from a launcher will show up here.')
+        : k==='hidden' ? E('eyeoff','Nothing hidden','Hide a game from its ⋯ menu and it’ll wait here.')
+        : E('grid','Nothing here yet','Try another view.');
     } else if(S.mode==='grid'){
       h+=`<div class="grid">${list.map(card).join('')}</div>`;
     } else {
@@ -3235,7 +3281,7 @@ function renderDrawer(){
         <div class="ds"><span>Last 2 weeks</span><b>${fmtTime(g.recent)}</b></div>
         <div class="ds"><span>Last played</span><b>${lastLabel(g)}</b></div>
         <div class="ds"><span>Size on disk</span><b>${g.installed===false?'—':fmtSize(g.size)}</b></div></div>
-      <div class="note">${ic('info')}${sourceNote(g)}</div>
+      ${badgesHTML(g,'d-badges')}<div class="note">${ic('info')}${sourceNote(g)}</div>
       <div id="dAbout">${aboutHTML(DET[g.id])}</div>
       <label class="lbl">Collection</label>
       <input class="inp" id="coll" placeholder="Type a name, e.g. Co-op or Backlog — Enter to save" value="${esc(g.collection)}">
@@ -3382,7 +3428,7 @@ async function renderHero(){
   $('#heroBody').innerHTML=`<div class="hero-title" id="heroTitle"><h1>${esc(g.name)}</h1></div>
     <div class="hero-meta"><span class="lchip"><span class="dot" style="background:${lc(g.launcher)}"></span>${esc(g.launcher)}</span>
       ${agoPhrase(g)?`<span>${agoPhrase(g)}</span>`:''}${g.total?`<span><b>${fmtTime(g.total)}</b>played</span>`:''}${g.update?`<span class="upd inline ${g.update}"><i></i>${UPD[g.update]}</span>`:''}</div>
-    <div class="hero-acts"><button class="btn go" data-play="${esc(id)}">${ic('play')}${g.last?'Continue':'Play'}</button>
+    ${badgesHTML(g,'hero-badges')}<div class="hero-acts"><button class="btn go" data-play="${esc(id)}">${ic('play')}${g.last?'Continue':'Play'}</button>
       <button class="btn glass" data-open="${esc(id)}">Details</button>${starBtn(g,'star hstar')}${moreBtn(g,'more hmore')}</div>`;
   heroShown=id;
   applyGameColor(GC[id]);
@@ -3446,21 +3492,67 @@ async function load(state){
     delete COV[g.id]; delete PENDING[g.id];
     document.querySelectorAll('[data-cover] img').forEach(i=>{ if(i.parentElement.dataset.cover===g.id) i.remove(); }); } }
   render(); }
-function toast(msg, ms=2600){ const t=$('#toast'); t.textContent=msg; t.classList.add('on'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('on'),ms); }
+function toast(msg, ms=2600, icon=''){ const t=$('#toast'); t.innerHTML=(icon?`<span class="ti">${icon}</span>`:'')+`<span>${esc(msg)}</span>`;
+  t.classList.remove('on'); void t.offsetWidth; t.classList.add('on'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('on'),ms); }
+const pick=a=>a[Math.floor(Math.random()*a.length)];
+const DAY=86400;
+function daysSince(ts){ return ts?Math.floor((Date.now()/1000-ts)/DAY):null; }
+// Small earned labels, worked out from play time only
+function badges(g){
+  const b=[], h=(g.total||0)/3600, r=(g.recent||0)/3600, d=daysSince(g.last);
+  if(h>=1000) b.push(['gold','👑','1,000-hour legend']);
+  else if(h>=500) b.push(['gold','🏆','500-hour club']);
+  else if(h>=100) b.push(['gold','🏅','100-hour club']);
+  if(r>=20) b.push(['hot','🔥','Can’t put it down']);
+  else if(r>=8) b.push(['hot','🔥','On a roll']);
+  if(g.last){ const hr=new Date(g.last*1000).getHours(); if(hr>=0&&hr<5&&d!==null&&d<30) b.push(['owl','🌙','Night owl']); }
+  if(g.installed!==false&&!g.playing){
+    if(!g.total&&!g.last&&g.launcher==='Steam') b.push(['new','✨','Still in the wrapper']);
+    else if(d!==null&&d>=365) b.push(['dust','🕸️','A year untouched']);
+    else if(d!==null&&d>=90) b.push(['dust','🕸️','Gathering dust']);
+  }
+  return b; }
+function badgesHTML(g, cls){ const b=badges(g); return b.length?`<div class="badges ${cls}">${b.map(([c,i,t])=>`<span class="badge ${c}"><i>${i}</i>${t}</span>`).join('')}</div>`:''; }
+function greeting(){
+  const hr=new Date().getHours();
+  if(hr<5) return pick(['Still up?','Late-night session?','One more run?']);
+  if(hr<12) return 'Good morning'; if(hr<18) return 'Good afternoon'; return 'Good evening'; }
+function homeLine(vis){
+  const on=vis.find(g=>g.playing); if(on) return `Have fun in <b>${esc(on.name)}</b>`;
+  const rec=vis.filter(g=>g.recent>0).sort((a,b)=>b.recent-a.recent);
+  const tot=rec.reduce((a,g)=>a+g.recent,0);
+  if(rec.length&&tot>=3600) return `<b>${fmtTime(tot)}</b> played these last two weeks — mostly <b>${esc(rec[0].name)}</b>`;
+  const last=vis.filter(g=>g.last).sort((a,b)=>b.last-a.last)[0];
+  if(last&&daysSince(last.last)>=14) return `It’s been a while. <b>${esc(last.name)}</b> is right where you left it`;
+  if(last) return `Last time it was <b>${esc(last.name)}</b>. Pick up where you left off?`;
+  return `${vis.length} game${vis.length===1?'':'s'} ready to play`; }
+function longAgo(ts){ const d=daysSince(ts); if(d===null) return '';
+  if(d>=730) return `${Math.floor(d/365)} years ago`; if(d>=365) return 'Over a year ago';
+  if(d>=60) return `${Math.floor(d/30)} months ago`; return `${Math.floor(d/7)} weeks ago`; }
+function funTotal(sec){ const h=sec/3600; if(h<48) return '';
+  const days=Math.round(h/24); return days>=365?`that’s ${(days/365).toFixed(1)} years nonstop`:`that’s ${days} days nonstop`; }
+function burst(el){
+  const r=el.getBoundingClientRect(), b=document.createElement('div'); b.className='burst';
+  b.style.left=(r.left+r.width/2)+'px'; b.style.top=(r.top+r.height/2)+'px';
+  for(let i=0;i<10;i++){ const a=i/10*Math.PI*2, d=22+Math.random()*12, s=document.createElement('i');
+    s.style.setProperty('--x',Math.cos(a)*d+'px'); s.style.setProperty('--y',Math.sin(a)*d+'px'); b.appendChild(s); }
+  document.body.appendChild(b); setTimeout(()=>b.remove(),700); }
+const QUIPS=['Blowing on the cartridges…','Asking every launcher nicely…','Counting your hours. No judgment.','Dusting off the backlog…','Lining up the shelf…','Finding the good cover art…','Untangling the controller cables…','Checking under the couch for games…'];
 async function play(id){
   const g=gameById(id); const r=await api().play(id);
   if(!r.ok) return toast('Couldn’t launch: '+r.error);
   if(g&&g.update==='update'&&g.launcher==='Steam') return toast(`Steam will update ${g.name} before it starts`);
   if(g&&(g.update==='updating'||g.update==='paused')) return toast(`${g.name} is still updating — Steam will start it when it's done`);
-  toast(r.note||('Launching '+(g?g.name:'game')+'…')); }
+  const n=g?g.name:'your game';
+  toast(r.note||pick([`Launching ${n}. Have fun!`,`${n} is starting. Good luck out there.`,`Loading ${n}… grab a drink.`,`Here we go: ${n}`]), 2600, r.note?'':'🎮'); }
 
 async function toggleStar(id, btn){
   const g=gameById(id); if(!g) return;
   g.fav=!g.fav;                                   // instant feedback
   document.querySelectorAll('[data-star]').forEach(b=>{ if(b.dataset.star===id){ b.classList.toggle('on',g.fav);
     b.title=g.fav?'Remove from favorites':'Add to favorites'; } });
-  if(btn){ btn.classList.remove('pop'); void btn.offsetWidth; btn.classList.add('pop'); }
-  toast(g.fav?`Added ${g.name} to Favorites`:`Removed ${g.name} from Favorites`);
+  if(btn){ btn.classList.remove('pop'); void btn.offsetWidth; btn.classList.add('pop'); if(g.fav) burst(btn); }
+  toast(g.fav?`${g.name} is a favorite now`:`${g.name} left your favorites`, 2600, g.fav?'⭐':'');
   const st=await api().toggle_favorite(id);
   setTimeout(()=>load(st), 380);                  // let the pop animation finish, then refresh rows
 }
@@ -3854,9 +3946,14 @@ document.addEventListener('visibilitychange',()=>{
 });
 let started=false;
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+let quipT=null;
+function startQuips(){ const q=$('#spQuip'); if(!q) return; let i=Math.floor(Math.random()*QUIPS.length); q.textContent=QUIPS[i];
+  quipT=setInterval(()=>{ if(!$('#spQuip')) return clearInterval(quipT); q.classList.add('out');
+    setTimeout(()=>{ i=(i+1)%QUIPS.length; q.textContent=QUIPS[i]; q.classList.remove('out'); },350); },2200); }
 function setSplash(pct, text){ if(!$('#spFill')) return; $('#spFill').style.width=Math.max(3,Math.min(100,pct))+'%'; if(text!==undefined) $('#spText').textContent=text; }
 async function init(){
   if(started) return; started=true;
+  startQuips();
   let skipped=false;
   $('#spSkip').onclick=()=>{ skipped=true; };
   const skipTimer=setTimeout(()=>{ const b=$('#spSkip'); if(b) b.classList.add('on'); }, 8000);
@@ -3884,7 +3981,7 @@ async function init(){
   setSplash(100,'Ready');
   await sleep(skipped?0:250);
   clearTimeout(skipTimer);
-  $('#splash').classList.add('hide');
+  clearInterval(quipT); $('#splash').classList.add('hide');
   setTimeout(()=>{ const sp=$('#splash'); if(sp) sp.remove(); }, 700);  // gone for good, nothing left animating
 }
 window.addEventListener('pywebviewready', init);
