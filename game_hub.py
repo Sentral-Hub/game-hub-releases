@@ -65,12 +65,14 @@ DATA_FILE = os.path.join(DATA_DIR, "library.json")
 ART_DIR = os.path.join(DATA_DIR, "covers")
 UA = "GameHub/1.0 (personal game library app)"
 ART_VERSION = 2   # bump to re-fetch art (v2 added hero banners + logos)
-VERSION = "0.022"
+VERSION = "0.023"
 DEFAULT_UPDATE_URL = __import__("base64").b64decode("aHR0cHM6Ly9naXRodWIuY29tL1NlbnRyYWwtSHViL2dhbWUtaHViLXJlbGVhc2VzL2Jsb2IvbWFpbi9nYW1lX2h1Yi5weQ==").decode()
-WHATS_NEW = "Game Hub now shows as Game Hub, with its own icon, in Task Manager and on the taskbar, instead of as Python."
+WHATS_NEW = "Game Hub can now be installed with a downloadable installer, GameHubSetup.exe, which includes everything it needs."
 PID_FILE = os.path.join(DATA_DIR, "running.pid")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APPDATA), "Programs", "Game Hub")
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\GameHub"
+# The downloadable installer (GameHubSetup.exe, built with Inno Setup) registers under its own key
+SETUP_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{B6F1C2E4-7A3D-4C59-9E21-5D8A6F3B0C71}_is1"
 POLL_SECONDS = 15
 MIN_SESSION = 30          # seconds; shorter runs are ignored
 TWO_WEEKS = 14 * 86400
@@ -1433,11 +1435,11 @@ def startup_file():
 
 
 def gui_python():
-    """pythonw.exe of the real Python install (no console window)."""
-    for d in (sys.base_prefix, os.path.dirname(sys.executable)):
-        w = os.path.join(d, "pythonw.exe")
-        if os.path.isfile(w):
-            return w
+    """The windowless Python to start Game Hub with: pythonw.exe, or Game Hub.exe in the downloadable install."""
+    here = os.path.dirname(sys.executable)
+    for p in (os.path.join(sys.base_prefix, "pythonw.exe"), os.path.join(here, "Game Hub.exe"), os.path.join(here, "pythonw.exe")):
+        if os.path.isfile(p):
+            return p
     return sys.executable
 
 
@@ -2404,7 +2406,11 @@ class App:
 
     def uninstall(self):
         # the uninstaller asks this window to close (saving first), so no need to quit here
-        subprocess.Popen([gui_python(), os.path.abspath(__file__), "--uninstall"])
+        setup_uninstaller = os.path.join(INSTALL_DIR, "unins000.exe")
+        if setup_installed() and os.path.isfile(setup_uninstaller):
+            subprocess.Popen([setup_uninstaller])
+        else:
+            subprocess.Popen([gui_python(), os.path.abspath(__file__), "--uninstall"])
         return True
 
     def install_on_pc(self):
@@ -3985,8 +3991,8 @@ RUNTIME_REV = 1          # bump to rebuild everyone's copy
 
 
 def in_runtime():
-    exe = os.path.normcase(os.path.abspath(sys.executable))
-    return exe.startswith(os.path.normcase(RUNTIME_ROOT)) and os.path.basename(exe) == "game hub.exe"
+    """Already running as "Game Hub.exe" (our own copy, or the one in the downloadable install)."""
+    return os.path.basename(os.path.normcase(sys.executable)) == "game hub.exe"
 
 
 def _vs_node(key, value=b"", wtype=1, vlen=0, children=()):
@@ -4635,9 +4641,16 @@ def close_running_game_hub(timeout=12):
         pass
 
 
+def setup_installed():
+    """Installed with the downloadable installer (GameHubSetup.exe)."""
+    return bool(winreg and reg_get(winreg.HKEY_CURRENT_USER, SETUP_KEY, "DisplayName"))
+
+
 def installed_version():
     """Version of the installed copy (from Windows' Apps list), or None."""
-    return reg_get(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY, "DisplayVersion") if winreg else None
+    if not winreg:
+        return None
+    return reg_get(winreg.HKEY_CURRENT_USER, SETUP_KEY, "DisplayVersion") or reg_get(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY, "DisplayVersion")
 
 
 def running_installed():
@@ -4648,12 +4661,13 @@ def refresh_install_record():
     """Keep Windows' Apps list showing the version you actually have, after Game Hub updates itself."""
     if not (winreg and running_installed()):
         return
-    try:
-        if installed_version() != VERSION:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY, 0, winreg.KEY_WRITE) as k:
-                winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, VERSION)
-    except OSError:
-        pass
+    for key in (SETUP_KEY, UNINSTALL_KEY):
+        try:
+            if reg_get(winreg.HKEY_CURRENT_USER, key, "DisplayName") and reg_get(winreg.HKEY_CURRENT_USER, key, "DisplayVersion") != VERSION:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_WRITE) as k:
+                    winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, VERSION)
+        except OSError:
+            pass
 
 
 # ---------- small themed window for the installer and uninstaller
@@ -4828,8 +4842,10 @@ def install():
                     subprocess.Popen([pyw, dest], cwd=INSTALL_DIR)
             w.button("Finish", close, primary=True)
 
-        w.run_steps([("Closing Game Hub", close_running_game_hub), ("Copying Game Hub", copy_files),
-                     ("Creating shortcuts", shortcuts), ("Adding Game Hub to Windows' Apps list", register)], finished)
+        steps = [("Closing Game Hub", close_running_game_hub), ("Copying Game Hub", copy_files)]
+        if not setup_installed():
+            steps += [("Creating shortcuts", shortcuts), ("Adding Game Hub to Windows' Apps list", register)]
+        w.run_steps(steps, finished)
 
     welcome()
     w.root.mainloop()
@@ -4936,6 +4952,8 @@ def setup_crash_log():
 
 def main():
     setup_crash_log()
+    if "--enable-startup" in sys.argv:          # used by GameHubSetup.exe
+        return set_startup(True, os.path.abspath(__file__))
     refresh_install_record()
     if "--install" in sys.argv:
         return install()

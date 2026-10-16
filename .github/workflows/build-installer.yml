@@ -1,0 +1,64 @@
+name: Build installer
+
+on:
+  push:
+    branches: [main]
+    paths: [game_hub.py, installer/**, .github/workflows/build-installer.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-installer
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Read the version
+        id: v
+        shell: pwsh
+        run: |
+          $m = Select-String -Path game_hub.py -Pattern '^VERSION = "([\d.]+)"' | Select-Object -First 1
+          $notes = (Select-String -Path game_hub.py -Pattern '^WHATS_NEW = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          "version=$($m.Matches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          "notes=$notes" >> $env:GITHUB_OUTPUT
+
+      - name: Bundle Python and Game Hub
+        shell: pwsh
+        run: ./installer/bundle.ps1
+
+      - name: Check the bundle works
+        shell: pwsh
+        run: ./installer/check.ps1
+
+      - name: Build GameHubSetup.exe
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          $env:GH_VERSION = "${{ steps.v.outputs.version }}"
+          & $iscc installer\GameHub.iss
+          if ($LASTEXITCODE) { throw "Inno Setup failed" }
+          Get-Item dist\GameHubSetup.exe | Format-List Name, Length
+
+      - name: Publish the download
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v${{ steps.v.outputs.version }}"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag dist\GameHubSetup.exe --clobber
+          } else {
+            gh release create $tag dist\GameHubSetup.exe --title "Game Hub ${{ steps.v.outputs.version }}" --notes "${{ steps.v.outputs.notes }}" --latest
+          }
