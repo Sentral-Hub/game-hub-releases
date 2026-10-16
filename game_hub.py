@@ -65,9 +65,9 @@ DATA_FILE = os.path.join(DATA_DIR, "library.json")
 ART_DIR = os.path.join(DATA_DIR, "covers")
 UA = "GameHub/1.0 (personal game library app)"
 ART_VERSION = 2   # bump to re-fetch art (v2 added hero banners + logos)
-VERSION = "0.023"
+VERSION = "0.024"
 DEFAULT_UPDATE_URL = __import__("base64").b64decode("aHR0cHM6Ly9naXRodWIuY29tL1NlbnRyYWwtSHViL2dhbWUtaHViLXJlbGVhc2VzL2Jsb2IvbWFpbi9nYW1lX2h1Yi5weQ==").decode()
-WHATS_NEW = "Game Hub can now be installed with a downloadable installer, GameHubSetup.exe, which includes everything it needs."
+WHATS_NEW = "Smaller, faster updates: Game Hub now downloads updates compressed, skips the download when nothing has changed, and keeps fewer leftover files on your PC."
 PID_FILE = os.path.join(DATA_DIR, "running.pid")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APPDATA), "Programs", "Game Hub")
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\GameHub"
@@ -1399,11 +1399,17 @@ def small_copy(path, kind):
         return path
     try:
         st = os.stat(path)
-        key = re.sub(r"[^A-Za-z0-9]", "", base64.urlsafe_b64encode(
-            f"{path}|{st.st_mtime_ns}|{st.st_size}|{kind}".encode()).decode())[-40:]
-        out = os.path.join(ART_DIR, "small", f"{key}.{'png' if kind == 'logo' else 'jpg'}")
+        who = re.sub(r"[^A-Za-z0-9_-]", "", os.path.splitext(os.path.basename(path))[0])[:40]
+        who += "-" + hashlib.sha1(os.path.normcase(path).encode()).hexdigest()[:6] + "." + kind
+        ver = hashlib.sha1(f"{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest()[:8]
+        out = os.path.join(ART_DIR, "small", f"{who}.{ver}.{'png' if kind == 'logo' else 'jpg'}")
         if os.path.isfile(out):
             return out
+        for old in glob.glob(os.path.join(ART_DIR, "small", glob.escape(who) + ".*")):
+            try:
+                os.remove(old)                # the picture changed: drop the previous resized copy
+            except OSError:
+                pass
         with _Im.open(path) as im:
             if im.width <= box[0] and im.height <= box[1] and os.path.getsize(path) < 400_000:
                 return path
@@ -1569,6 +1575,12 @@ class App:
 
     def _post_scan(self):
         """Cover art and folder sizes, side by side. Marks the app ready when the first round finishes."""
+        if not getattr(self, "_tidied", False):
+            self._tidied = True
+            try:
+                tidy_caches()
+            except Exception as e:
+                log_problem("tidying old files", e)
         with self._lock:
             if self._post_running:
                 self._post_again = True
@@ -2183,12 +2195,26 @@ class App:
             best = dict(h, source="Downloads", path=f)
         url = self._data["settings"].get("update_url") or DEFAULT_UPDATE_URL
         if use_url and url:
-            text, err = fetch_update_link(url, unseal(self._data["settings"].get("update_token", "")))
-            h = read_header(text or "")
+            token = unseal(self._data["settings"].get("update_token", ""))
+            cache = self._data.setdefault("update_cache", {})
+            known = cache.get(url) or {}
+            text, err, tag = fetch_update_link(url, token, known.get("etag") if known.get("version") else None)
+            if err == "unchanged":
+                h, text, err = {"version": known["version"], "notes": known.get("notes", "")}, None, None
+                held = self._app_update if (self._app_update or {}).get("version") == h["version"] else None
+                if better(h):
+                    if held and held.get("text"):
+                        text = held["text"]                    # already downloaded it this session
+                    else:                                      # an update is waiting: download it this once
+                        text, err, tag = fetch_update_link(url, token)
+            h = read_header(text) if text else (None if err else h)
             if text and not h:
                 err = "notgamehub"
+            if text and h:
+                cache[url] = {"etag": tag, "version": h["version"], "notes": h["notes"]}
+                self._save()
             self._update_err = err
-            if better(h) and valid_update(text):
+            if text and better(h) and valid_update(text):
                 best = dict(h, source="update link", text=text)
         elif use_url:
             self._update_err = None
@@ -2257,6 +2283,7 @@ class App:
         try:
             os.makedirs(os.path.join(DATA_DIR, "backup"), exist_ok=True)
             shutil.copy2(me, os.path.join(DATA_DIR, "backup", f"game_hub_{VERSION}.py"))
+            prune_backups()
             tmp = me + ".new"
             with open(tmp, "w", encoding="utf-8", newline="") as f:
                 f.write(text)
@@ -3973,6 +4000,35 @@ def ensure_packages():
     return True
 
 
+def prune_backups(keep=2):
+    """Keep only the newest few backups of earlier versions."""
+    folder = os.path.join(DATA_DIR, "backup")
+    try:
+        files = sorted((os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".py")),
+                       key=os.path.getmtime, reverse=True)
+    except OSError:
+        return
+    for f in files[keep:]:
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+
+def tidy_caches():
+    """Remove leftovers so Game Hub's folder doesn't grow over time."""
+    prune_backups()
+    small = os.path.join(ART_DIR, "small")
+    try:
+        for f in os.listdir(small):
+            if f.count(".") < 2:          # resized pictures saved by older versions (unnamed, never cleaned)
+                os.remove(os.path.join(small, f))
+    except OSError:
+        pass
+    for f in glob.glob(os.path.join(ART_DIR, "*.building")) + glob.glob(os.path.join(RUNTIME_ROOT, "*.building")):
+        shutil.rmtree(f, ignore_errors=True)
+
+
 def clear_scan_caches():
     """Forget every remembered folder/launcher result so the next scan reads everything fresh."""
     global _steam_root, _epic_cat
@@ -4468,41 +4524,52 @@ def github_parts(u):
     return None
 
 
-def fetch_update_link(url, token=None):
-    """(text, None) or (None, reason). Uses GitHub's API with the token for private repositories."""
-    parts = github_parts(url)
-    if parts and not token:
-        # GitHub's API always answers with the newest file; the plain file server can lag ~5 minutes behind.
-        owner, repo, ref, path = parts
-        api = f"https://api.github.com/repos/{owner}/{repo}/contents/{quote(path)}" + (f"?ref={quote(ref)}" if ref else "")
-        try:
-            with urlopen(Request(api, headers={"User-Agent": UA, "Accept": "application/vnd.github.raw",
-                                               "X-GitHub-Api-Version": "2022-11-28", "Cache-Control": "no-cache"}), timeout=15) as r:
-                return r.read().decode("utf-8", "ignore"), None
-        except Exception:
-            pass   # e.g. the API's hourly limit: fall back to the file server below
-    if token and parts:
-        owner, repo, ref, path = parts
-        api = f"https://api.github.com/repos/{owner}/{repo}/contents/{quote(path)}" + (f"?ref={quote(ref)}" if ref else "")
-        req = Request(api, headers={"User-Agent": UA, "Accept": "application/vnd.github.raw",
-                                    "Authorization": f"Bearer {token}", "X-GitHub-Api-Version": "2022-11-28"})
-    elif parts:
-        owner, repo, ref, path = parts
-        req = Request(f"https://raw.githubusercontent.com/{owner}/{repo}/{ref or 'HEAD'}/{path}?t={int(time.time())}",
-                      headers={"User-Agent": UA, "Cache-Control": "no-cache"})   # the ?t= skips the server's saved copy
-    else:
-        req = Request(url, headers={"User-Agent": UA})
+def _fetch(req, etag=None):
+    """(text, etag, error). Asks for a compressed copy, and for nothing at all if it hasn't changed (etag)."""
+    import gzip
+    req.add_header("Accept-Encoding", "gzip")
+    if etag:
+        req.add_header("If-None-Match", etag)
     try:
         with urlopen(req, timeout=15) as r:
-            return r.read().decode("utf-8", "ignore"), None
+            raw = r.read()
+            if (r.headers.get("Content-Encoding") or "").lower() == "gzip":
+                raw = gzip.decompress(raw)
+            return raw.decode("utf-8", "ignore"), r.headers.get("ETag"), None
     except HTTPError as e:
-        if e.code == 401:
-            return None, "token"            # token wrong or expired
-        if e.code in (403, 404):
-            return None, "private" if not token else "access"
-        return None, "network"
+        if e.code == 304:
+            return None, etag, "unchanged"       # nothing new: GitHub sent no file at all
+        return None, None, e.code
     except Exception:
-        return None, "network"
+        return None, None, "network"
+
+
+def fetch_update_link(url, token=None, etag=None):
+    """(text, error, etag). error is "unchanged" when the file is the same as last time (nothing downloaded)."""
+    parts = github_parts(url)
+    if parts:
+        owner, repo, ref, path = parts
+        api = f"https://api.github.com/repos/{owner}/{repo}/contents/{quote(path)}" + (f"?ref={quote(ref)}" if ref else "")
+        headers = {"User-Agent": UA, "Accept": "application/vnd.github.raw", "X-GitHub-Api-Version": "2022-11-28"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        # GitHub's API always has the newest file (the plain file server can lag ~5 minutes behind)
+        text, tag, err = _fetch(Request(api, headers=headers), etag)
+        if text is not None or err == "unchanged" or token:
+            if err == 401:
+                return None, "token", None
+            if err in (403, 404):
+                return None, "access" if token else "private", None
+            return text, (None if text is not None else (err if err == "unchanged" else "network")), tag
+        # e.g. the API's hourly limit: use the file server, skipping its saved copy with ?t=
+        req = Request(f"https://raw.githubusercontent.com/{owner}/{repo}/{ref or 'HEAD'}/{path}?t={int(time.time())}",
+                      headers={"User-Agent": UA, "Cache-Control": "no-cache"})
+    else:
+        req = Request(url, headers={"User-Agent": UA})
+    text, tag, err = _fetch(req, etag)
+    if text is not None or err == "unchanged":
+        return text, err, tag
+    return None, "private" if err in (403, 404) else "network", None
 
 
 class _Blob(ctypes.Structure):   # DATA_BLOB for Windows' CryptProtectData

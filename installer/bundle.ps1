@@ -27,12 +27,19 @@ $pth = Get-ChildItem "$app\python\python*._pth" | Select-Object -First 1
 
 # 3. Game Hub's packages
 python -m pip install --disable-pip-version-check -q --upgrade pip
-python -m pip install --disable-pip-version-check -q --target "$app\python\Lib\site-packages" --prefer-binary pywebview pystray pillow
+python -m pip install --disable-pip-version-check -q --target "$app\python\Lib\site-packages" --prefer-binary --no-compile pywebview pystray pillow
 
 # 4. The window toolkit (tkinter) used by the setup screens; the embeddable package leaves it out
 Copy-Item "$home_\Lib\tkinter" "$app\python\Lib\tkinter" -Recurse
 Get-ChildItem "$home_\DLLs" -Include "_tkinter.pyd","tcl*.dll","tk*.dll","zlib*.dll" -File -Recurse | Copy-Item -Destination "$app\python\"
 Copy-Item "$home_\tcl" "$app\python\tcl" -Recurse
+
+# 4b. Leave out what Game Hub never uses, so the download and the install stay small
+$sp = "$app\python\Lib\site-packages"
+Get-ChildItem $sp -Recurse -Directory -Include "__pycache__", "tests", "test" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+Get-ChildItem $sp -Recurse -Directory | Where-Object { $_.FullName -match "clr_loader" -and $_.Name -in "x86", "arm64" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+foreach ($d in "tcl\tk8.6\demos", "tcl\tcl8.6\tzdata") { Remove-Item "$app\python\$d" -Recurse -Force -ErrorAction SilentlyContinue }
+"{0:N1} MB bundled" -f ((Get-ChildItem $app -Recurse -File | Measure-Object Length -Sum).Sum / 1MB) | Write-Host
 
 # 5. Game Hub, and "Game Hub.exe" (Python's pythonw.exe with Game Hub's name and icon)
 Copy-Item game_hub.py "$app\"
