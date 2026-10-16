@@ -63,9 +63,9 @@ DATA_FILE = os.path.join(DATA_DIR, "library.json")
 ART_DIR = os.path.join(DATA_DIR, "covers")
 UA = "GameHub/1.0 (personal game library app)"
 ART_VERSION = 2   # bump to re-fetch art (v2 added hero banners + logos)
-VERSION = "0.019"
+VERSION = "0.020"
 DEFAULT_UPDATE_URL = __import__("base64").b64decode("aHR0cHM6Ly9naXRodWIuY29tL1NlbnRyYWwtSHViL2dhbWUtaHViLXJlbGVhc2VzL2Jsb2IvbWFpbi9nYW1lX2h1Yi5weQ==").decode()
-WHATS_NEW = "New version numbering: 0.019 onwards, until version 1."
+WHATS_NEW = "A new installer with options and progress, an Install button in Settings, and Windows always shows the version you have."
 PID_FILE = os.path.join(DATA_DIR, "running.pid")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APPDATA), "Programs", "Game Hub")
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\GameHub"
@@ -1494,6 +1494,7 @@ class App:
             pass
         threading.Thread(target=self._scan, daemon=True).start()
         threading.Thread(target=self._tracker, daemon=True).start()
+        threading.Thread(target=self._quit_watch, daemon=True).start()
 
     # ---------- persistence
     def _load(self):
@@ -1900,6 +1901,7 @@ class App:
                     "collections": sorted(set(d["collections"].values()), key=str.lower),
                     "settings": settings, "tray": bool(self._tray), "windows": os.name == "nt",
                     "app_version": VERSION,
+                    "install": {"running_installed": running_installed(), "installed_version": installed_version()},
                     "app_update": {"version": self._app_update["version"], "notes": self._app_update["notes"],
                                    "source": "Downloads" if self._app_update["source"] == "Downloads" else ""} if self._app_update else None}
 
@@ -2382,9 +2384,26 @@ class App:
                 threading.Thread(target=self._scan, daemon=True).start()
         return self.get_state()
 
+    def _quit_watch(self):
+        """The installer and uninstaller leave a note asking Game Hub to quit, so it can save first."""
+        me = str(os.getpid())
+        while not self._quitting:
+            try:
+                if os.path.exists(QUIT_FILE) and open(QUIT_FILE).read().strip() == me:
+                    os.remove(QUIT_FILE)
+                    self._quit()
+                    return
+            except OSError:
+                pass
+            time.sleep(1)
+
     def uninstall(self):
+        # the uninstaller asks this window to close (saving first), so no need to quit here
         subprocess.Popen([gui_python(), os.path.abspath(__file__), "--uninstall"])
-        threading.Timer(0.3, self._quit).start()
+        return True
+
+    def install_on_pc(self):
+        subprocess.Popen([gui_python(), os.path.abspath(__file__), "--install"])
         return True
 
     # ---------- window / tray
@@ -3647,7 +3666,12 @@ function settings(){
     <div class="sethead">Updates <span>Version ${esc(S.data.app_version)}</span></div>
     ${row('check_updates','Check for updates','Game Hub checks for new versions on its own and lets you know when one is ready.',s.check_updates)}
     <div class="updacts"><button class="btn" data-act="checkupd">${ic('refresh')}Check now</button><button class="btn" data-act="updfile">${ic('folder')}Install from a file…</button></div>
-    <div class="acts" style="justify-content:space-between"><button class="btn danger" data-act="uninstall">${ic('trash')}Uninstall Game Hub…</button>
+    <div class="sethead">This PC</div>
+    ${(()=>{ const ins=S.data.install||{};
+      if(ins.running_installed) return `<div class="set"><div><b>Installed</b><small>In your Start menu and in Windows Settings → Apps. It updates itself.</small></div></div>`;
+      if(ins.installed_version) return `<div class="set"><div><b>Running a separate copy</b><small>Game Hub ${esc(ins.installed_version)} is also installed on this PC. Install this version to replace it.</small></div><button class="btn" data-act="installpc">${ic('download')}Install this version</button></div>`;
+      return `<div class="set"><div><b>Not installed</b><small>Install Game Hub to get Start menu and desktop shortcuts, and an entry in Windows Settings → Apps.</small></div><button class="btn" data-act="installpc">${ic('download')}Install Game Hub…</button></div>`; })()}
+    <div class="acts" style="justify-content:space-between">${(S.data.install||{}).running_installed?`<button class="btn danger" data-act="uninstall">${ic('trash')}Uninstall Game Hub…</button>`:'<span></span>'}
     <button class="btn primary" data-act="closemodal">Done</button></div>`);
 }
 
@@ -3729,6 +3753,7 @@ document.addEventListener('click', async e=>{
     case 'remove': S.open=null; return load(await api().remove_custom(id));
     case 'forget': { const g=gameById(id); S.open=null; toast(g&&g.installed!==false?`${g.name} won't be listed again`:`Removed ${g?g.name:'game'} from the Uninstalled list`); return load(await api().forget_game(id)); }
     case 'uninstall': closeModal(); return api().uninstall();
+    case 'installpc': closeModal(); toast('Opening the installer…'); return api().install_on_pc();
   }
 });
 document.addEventListener('input', e=>{ if(e.target.id==='q'){ S.q=e.target.value; renderContent(); renderTop(); observeCovers(); } });
@@ -4337,102 +4362,321 @@ def _tk_root():
     return root
 
 
+# ---------- closing a running Game Hub safely (so play time in progress is saved)
+QUIT_FILE = os.path.join(DATA_DIR, "quit.request")
+
+
+def _pid_alive(pid):
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    k32 = ctypes.windll.kernel32
+    h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return False
+    code = ctypes.c_ulong()
+    k32.GetExitCodeProcess(h, ctypes.byref(code))
+    k32.CloseHandle(h)
+    return code.value == 259  # STILL_ACTIVE
+
+
+def close_running_game_hub(timeout=12):
+    """Ask a running Game Hub to quit (it saves first); force it only if it doesn't respond."""
+    try:
+        pid = int(open(PID_FILE).read().strip())
+    except (OSError, ValueError):
+        return
+    if pid == os.getpid() or not _pid_alive(pid):
+        return
+    try:
+        with open(QUIT_FILE, "w") as f:
+            f.write(str(pid))
+    except OSError:
+        pass
+    end = time.time() + timeout
+    while time.time() < end and _pid_alive(pid):
+        time.sleep(0.25)
+    if _pid_alive(pid):
+        subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, creationflags=NO_WINDOW)
+        time.sleep(0.5)
+    try:
+        os.remove(QUIT_FILE)
+    except OSError:
+        pass
+
+
+def installed_version():
+    """Version of the installed copy (from Windows' Apps list), or None."""
+    return reg_get(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY, "DisplayVersion") if winreg else None
+
+
+def running_installed():
+    return os.path.normcase(os.path.dirname(os.path.abspath(__file__))) == os.path.normcase(INSTALL_DIR)
+
+
+def refresh_install_record():
+    """Keep Windows' Apps list showing the version you actually have, after Game Hub updates itself."""
+    if not (winreg and running_installed()):
+        return
+    try:
+        if installed_version() != VERSION:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY, 0, winreg.KEY_WRITE) as k:
+                winreg.SetValueEx(k, "DisplayVersion", 0, winreg.REG_SZ, VERSION)
+    except OSError:
+        pass
+
+
+# ---------- small themed window for the installer and uninstaller
+class _Wizard:
+    BG, PANEL, FG, MUTED, ACCENT, LINE = "#0f1117", "#171a23", "#eceef4", "#8d95a9", "#7c5cff", "#262b38"
+
+    def __init__(self, title, height=380):
+        import tkinter as tk
+        from tkinter import ttk
+        self.tk, self.ttk = tk, ttk
+        self.root = tk.Tk()
+        self.root.title(title)
+        self.root.geometry(f"500x{height}")
+        self.root.resizable(False, False)
+        self.root.configure(bg=self.BG)
+        try:
+            ico = os.path.join(INSTALL_DIR, "game_hub.ico")
+            if os.path.isfile(ico):
+                self.root.iconbitmap(ico)
+        except Exception:
+            pass
+        st = ttk.Style(self.root)
+        st.theme_use("clam")
+        st.configure("G.Horizontal.TProgressbar", troughcolor=self.LINE, background=self.ACCENT,
+                     bordercolor=self.BG, lightcolor=self.ACCENT, darkcolor=self.ACCENT, thickness=8)
+        self.body = tk.Frame(self.root, bg=self.BG)
+        self.body.pack(fill="both", expand=True, padx=28, pady=(24, 0))
+        self.bar = tk.Frame(self.root, bg=self.BG)
+        self.bar.pack(fill="x", padx=28, pady=22)
+
+    def clear(self):
+        for w in list(self.body.winfo_children()) + list(self.bar.winfo_children()):
+            w.destroy()
+
+    def heading(self, text, sub=None):
+        self.tk.Label(self.body, text=text, bg=self.BG, fg=self.FG, font=("Segoe UI Semibold", 16), anchor="w",
+                      justify="left").pack(fill="x")
+        if sub:
+            self.tk.Label(self.body, text=sub, bg=self.BG, fg=self.MUTED, font=("Segoe UI", 10), anchor="w",
+                          justify="left", wraplength=440).pack(fill="x", pady=(6, 0))
+
+    def text(self, t, muted=False, pady=(10, 0)):
+        lbl = self.tk.Label(self.body, text=t, bg=self.BG, fg=self.MUTED if muted else self.FG, font=("Segoe UI", 10),
+                            anchor="w", justify="left", wraplength=440)
+        lbl.pack(fill="x", pady=pady)
+        return lbl
+
+    def check(self, label, value):
+        var = self.tk.BooleanVar(value=value)
+        self.tk.Checkbutton(self.body, text=label, variable=var, bg=self.BG, fg=self.FG, activebackground=self.BG,
+                            activeforeground=self.FG, selectcolor=self.PANEL, font=("Segoe UI", 10), anchor="w",
+                            highlightthickness=0, bd=0).pack(fill="x", pady=(8, 0))
+        return var
+
+    def button(self, label, cmd, primary=False):
+        b = self.tk.Button(self.bar, text=label, command=cmd, font=("Segoe UI Semibold" if primary else "Segoe UI", 10),
+                           bg=self.ACCENT if primary else self.PANEL, fg="#ffffff" if primary else self.FG,
+                           activebackground="#6a48ff" if primary else self.LINE, activeforeground="#ffffff",
+                           relief="flat", bd=0, padx=18, pady=7, cursor="hand2")
+        b.pack(side="right", padx=(8, 0))
+        return b
+
+    def progress(self):
+        pb = self.ttk.Progressbar(self.body, style="G.Horizontal.TProgressbar", mode="determinate", maximum=100)
+        pb.pack(fill="x", pady=(22, 0))
+        status = self.text("", muted=True)
+        return pb, status
+
+    def run_steps(self, steps, on_done):
+        """Run (label, fn) steps on a worker thread, showing progress; on_done(error_or_None)."""
+        pb, status = self.progress()
+        state = {"i": 0, "label": "", "err": None, "done": False}
+
+        def work():
+            for i, (label, fn) in enumerate(steps):
+                state["i"], state["label"] = i, label
+                try:
+                    fn()
+                except Exception as e:
+                    state["err"] = f"{label} failed: {e}"
+                    break
+            state["done"] = True
+
+        def tick():
+            pb["value"] = 100 * (state["i"] + (1 if state["done"] else 0.5)) / len(steps)
+            status.configure(text=state["label"] + "…")
+            if state["done"]:
+                pb["value"] = 100
+                on_done(state["err"])
+            else:
+                self.root.after(120, tick)
+        threading.Thread(target=work, daemon=True).start()
+        tick()
+
+
 def install():
-    from tkinter import messagebox
     if os.name != "nt" or not winreg:
         print("The installer only runs on Windows.")
         return
     if not ensure_packages():
         return
-    os.makedirs(INSTALL_DIR, exist_ok=True)
     src, dest = os.path.abspath(__file__), os.path.join(INSTALL_DIR, "game_hub.py")
-    if os.path.normcase(src) != os.path.normcase(dest):
-        shutil.copy2(src, dest)
-    pyw = gui_python()
-    icon = make_icon(os.path.join(INSTALL_DIR, "game_hub.ico")) or pyw
-    with open(os.path.join(INSTALL_DIR, "Uninstall Game Hub.bat"), "w") as f:
-        f.write(f'@echo off\r\nstart "" "{pyw}" "{dest}" --uninstall\r\n')
-    make_shortcut(start_menu_lnk(), pyw, f'"{dest}"', INSTALL_DIR, icon)
-    make_shortcut(os.path.join(desktop_dir(), "Game Hub.lnk"), pyw, f'"{dest}"', INSTALL_DIR, icon)
-    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY, 0, winreg.KEY_WRITE) as k:
-        for name, val in (("DisplayName", "Game Hub"), ("DisplayVersion", VERSION), ("Publisher", "Game Hub"),
-                          ("DisplayIcon", icon), ("InstallLocation", INSTALL_DIR),
-                          ("UninstallString", f'"{pyw}" "{dest}" --uninstall')):
-            winreg.SetValueEx(k, name, 0, winreg.REG_SZ, val)
-        for name in ("NoModify", "NoRepair"):
-            winreg.SetValueEx(k, name, 0, winreg.REG_DWORD, 1)
-    if os.path.exists(startup_file()):
-        set_startup(True, dest)  # point "Start with Windows" at the installed copy
-    _tk_root()
-    messagebox.showinfo(APP_NAME, "Game Hub is installed!\n\nYou'll find it in your Start menu and on your desktop.\n"
-                                  "To remove it later: Windows Settings > Apps > Installed apps > Game Hub > Uninstall.")
-    subprocess.Popen([pyw, dest])
+    have = installed_version() if os.path.isfile(dest) else None
+    w = _Wizard("Install Game Hub")
+    opts = {}
+
+    def welcome():
+        w.clear()
+        if have and parse_version(have) == parse_version(VERSION):
+            w.heading(f"Reinstall Game Hub {VERSION}", "Game Hub is already installed. Reinstalling repairs its shortcuts and its entry in Windows.")
+        elif have:
+            w.heading(f"Install Game Hub {VERSION}", f"This replaces the installed version ({have}).")
+        else:
+            w.heading(f"Install Game Hub {VERSION}", "Installs Game Hub for your Windows account. No administrator rights needed.")
+        w.text("Your library, play time and settings are kept.", muted=True, pady=(4, 6))
+        opts["desktop"] = w.check("Add a desktop shortcut", True)
+        opts["startup"] = w.check("Start with Windows (so play time is always tracked)", os.path.exists(startup_file()))
+        opts["launch"] = w.check("Open Game Hub when finished", True)
+        w.button("Cancel", w.root.destroy)
+        w.button("Reinstall" if have and parse_version(have) == parse_version(VERSION) else "Install", go, primary=True)
+
+    def go():
+        o = {k: v.get() for k, v in opts.items()}
+        w.clear()
+        w.heading("Installing Game Hub…")
+        pyw = gui_python()
+        paths = {}
+
+        def copy_files():
+            os.makedirs(INSTALL_DIR, exist_ok=True)
+            if os.path.normcase(src) != os.path.normcase(dest):
+                tmp = dest + ".new"
+                shutil.copy2(src, tmp)
+                os.replace(tmp, dest)
+            paths["icon"] = make_icon(os.path.join(INSTALL_DIR, "game_hub.ico")) or pyw
+            with open(os.path.join(INSTALL_DIR, "Uninstall Game Hub.bat"), "w") as f:
+                f.write(f'@echo off\r\nstart "" "{pyw}" "{dest}" --uninstall\r\n')
+
+        def shortcuts():
+            make_shortcut(start_menu_lnk(), pyw, f'"{dest}"', INSTALL_DIR, paths["icon"])
+            desk = os.path.join(desktop_dir(), "Game Hub.lnk")
+            if o["desktop"]:
+                make_shortcut(desk, pyw, f'"{dest}"', INSTALL_DIR, paths["icon"])
+            elif os.path.exists(desk):
+                os.remove(desk)
+            set_startup(o["startup"], dest)
+
+        def register():
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY, 0, winreg.KEY_WRITE) as k:
+                for name, val in (("DisplayName", "Game Hub"), ("DisplayVersion", VERSION), ("Publisher", "Game Hub"),
+                                  ("DisplayIcon", paths["icon"]), ("InstallLocation", INSTALL_DIR),
+                                  ("UninstallString", f'"{pyw}" "{dest}" --uninstall'),
+                                  ("InstallDate", time.strftime("%Y%m%d"))):
+                    winreg.SetValueEx(k, name, 0, winreg.REG_SZ, val)
+                for name, val in (("NoModify", 1), ("NoRepair", 1), ("EstimatedSize", max(1, os.path.getsize(dest) // 1024))):
+                    winreg.SetValueEx(k, name, 0, winreg.REG_DWORD, val)
+
+        def finished(err):
+            w.clear()
+            if err:
+                w.heading("Game Hub couldn't be installed", err)
+                w.text("Nothing you had before was removed. Close any open Game Hub windows and try again.", muted=True)
+                w.button("Close", w.root.destroy, primary=True)
+                return
+            w.heading("Game Hub is installed")
+            w.text("Find it in your Start menu" + (" and on your desktop." if o["desktop"] else "."))
+            w.text("It updates itself. To remove it later, use Windows Settings → Apps → Installed apps → Game Hub.", muted=True)
+
+            def close():
+                w.root.destroy()
+                if o["launch"]:
+                    subprocess.Popen([pyw, dest], cwd=INSTALL_DIR)
+            w.button("Finish", close, primary=True)
+
+        w.run_steps([("Closing Game Hub", close_running_game_hub), ("Copying Game Hub", copy_files),
+                     ("Creating shortcuts", shortcuts), ("Adding Game Hub to Windows' Apps list", register)], finished)
+
+    welcome()
+    w.root.mainloop()
 
 
 def uninstall():
-    import tkinter as tk
-    from tkinter import messagebox
-    root = tk.Tk()
-    root.title("Uninstall Game Hub")
-    root.geometry("420x210")
-    root.resizable(False, False)
-    choice = {"go": False}
-    wipe = tk.BooleanVar(value=False)
-    tk.Label(root, text="Remove Game Hub from this PC?", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=20, pady=(18, 4))
-    tk.Label(root, text="Your games themselves are never touched.", font=("Segoe UI", 9)).pack(anchor="w", padx=20)
-    tk.Checkbutton(root, text="Also delete my Game Hub data (favorites, collections,\nplay time history and downloaded covers)",
-                   variable=wipe, justify="left", font=("Segoe UI", 9)).pack(anchor="w", padx=16, pady=14)
-    bar = tk.Frame(root)
-    bar.pack(fill="x", padx=20)
-    tk.Button(bar, text="Cancel", width=11, command=root.destroy).pack(side="right")
-    tk.Button(bar, text="Uninstall", width=11, command=lambda: (choice.update(go=True), root.destroy())).pack(side="right", padx=8)
-    root.mainloop()
-    if not choice["go"]:
-        return
+    w = _Wizard("Uninstall Game Hub", height=330)
+    wipe = {}
 
-    # 1. stop a running Game Hub
-    try:
-        pid = int(open(PID_FILE).read().strip())
-        if pid != os.getpid():
-            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, creationflags=NO_WINDOW)
-            time.sleep(0.5)
-    except (OSError, ValueError):
-        pass
-    # 2. start-with-Windows entry, shortcuts, Apps & features entry
-    try:
-        set_startup(False)
-    except OSError:
-        pass
-    for lnk in (start_menu_lnk(), os.path.join(desktop_dir(), "Game Hub.lnk")):
-        try:
-            os.remove(lnk)
-        except OSError:
-            pass
-    if winreg:
-        try:
-            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY)
-        except OSError:
-            pass
-    # 3. data
-    if wipe.get():
-        shutil.rmtree(DATA_DIR, ignore_errors=True)
-    else:
-        try:
-            os.remove(PID_FILE)
-        except OSError:
-            pass
-    # 4. program folder (only the installed copy; removed a moment after we exit)
-    here = os.path.dirname(os.path.abspath(__file__))
-    if os.name == "nt" and os.path.normcase(here) == os.path.normcase(INSTALL_DIR):
-        os.chdir(os.environ.get("TEMP", os.path.expanduser("~")))
-        subprocess.Popen(f'cmd /c "ping 127.0.0.1 -n 3 >nul & rmdir /s /q "{INSTALL_DIR}""',
-                         creationflags=NO_WINDOW | getattr(subprocess, "DETACHED_PROCESS", 0))
-    _tk_root()
-    messagebox.showinfo(APP_NAME, "Game Hub has been removed." + ("" if wipe.get() else
-                        "\n\nYour library data was kept, in case you reinstall later."))
+    def ask():
+        w.clear()
+        w.heading("Uninstall Game Hub?", "Removes Game Hub, its shortcuts and its entry in Windows. Your games are never touched.")
+        wipe["v"] = w.check("Also delete my Game Hub data (favorites, collections, play time history and covers)", False)
+        w.text("Keep your data if you might reinstall later.", muted=True, pady=(4, 0))
+        w.button("Cancel", w.root.destroy)
+        w.button("Uninstall", go, primary=True)
+
+    def go():
+        delete_data = wipe["v"].get()
+        w.clear()
+        w.heading("Uninstalling Game Hub…")
+
+        def shortcuts():
+            try:
+                set_startup(False)
+            except OSError:
+                pass
+            for lnk in (start_menu_lnk(), os.path.join(desktop_dir(), "Game Hub.lnk")):
+                try:
+                    os.remove(lnk)
+                except OSError:
+                    pass
+
+        def unregister():
+            if winreg:
+                try:
+                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY)
+                except OSError:
+                    pass
+
+        def data():
+            if delete_data:
+                shutil.rmtree(DATA_DIR, ignore_errors=True)
+            else:
+                for f in (PID_FILE, QUIT_FILE):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
+
+        def finished(err):
+            w.clear()
+            w.heading("Game Hub has been removed" if not err else "Game Hub was only partly removed", err or None)
+            if not err and not delete_data:
+                w.text("Your library data was kept, in case you reinstall later.", muted=True)
+
+            def close():
+                w.root.destroy()
+                # remove the program folder (only the installed copy) a moment after this window closes
+                if os.name == "nt" and running_installed():
+                    os.chdir(os.environ.get("TEMP", os.path.expanduser("~")))
+                    subprocess.Popen(f'cmd /c "ping 127.0.0.1 -n 3 >nul & rmdir /s /q "{INSTALL_DIR}""',
+                                     creationflags=NO_WINDOW | getattr(subprocess, "DETACHED_PROCESS", 0))
+            w.button("Close", close, primary=True)
+
+        w.run_steps([("Closing Game Hub", close_running_game_hub), ("Removing shortcuts", shortcuts),
+                     ("Removing Game Hub from Windows' Apps list", unregister), ("Tidying up", data)], finished)
+
+    ask()
+    w.root.mainloop()
 
 
 def main():
+    refresh_install_record()
     if "--install" in sys.argv:
         return install()
     if "--uninstall" in sys.argv:
