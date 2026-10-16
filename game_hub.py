@@ -65,9 +65,9 @@ DATA_FILE = os.path.join(DATA_DIR, "library.json")
 ART_DIR = os.path.join(DATA_DIR, "covers")
 UA = "GameHub/1.0 (personal game library app)"
 ART_VERSION = 2   # bump to re-fetch art (v2 added hero banners + logos)
-VERSION = "0.025"
+VERSION = "0.026"
 DEFAULT_UPDATE_URL = __import__("base64").b64decode("aHR0cHM6Ly9naXRodWIuY29tL1NlbnRyYWwtSHViL2dhbWUtaHViLXJlbGVhc2VzL2Jsb2IvbWFpbi9nYW1lX2h1Yi5weQ==").decode()
-WHATS_NEW = "More personality: a greeting on Home, badges your games earn from play time, a Miss these? row for old favorites, and livelier loading, toasts and favorites."
+WHATS_NEW = "Folders you add under games without a launcher are now searched several levels deep, so every game inside them is found."
 PID_FILE = os.path.join(DATA_DIR, "running.pid")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APPDATA), "Programs", "Game Hub")
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\GameHub"
@@ -699,11 +699,33 @@ def sa_game(d, hit, name=None):
     return game(gid, nm, "Standalone", d, exe)
 
 
+SA_GENERIC = {"bin", "bin64", "bin32", "x64", "x86", "win64", "win32", "binaries", "release", "windows",
+              "windowsnoeditor", "game", "app", "program"}
+SA_JUNK_DIRS = {"redist", "_redist", "redistributables", "_commonredist", "commonredist", "directx", "dotnet", "vcredist",
+                "support", "docs", "manual", "extras", "soundtrack", "ost", "artbook", "__installer", "_installer",
+                "installers", "saves", "save", "screenshots", "mods", "logs", "temp", "tmp", "cache", "$recycle.bin",
+                "system volume information"}
+
+
+def loose_exe(d):
+    """A plain game .exe in d (no engine fingerprint needed): big enough to be a real program, not a setup or tool."""
+    exe = best_exe(d)
+    if not exe:
+        return None
+    try:
+        big = os.path.getsize(exe) >= 1_000_000
+    except OSError:
+        big = False
+    if not big and not any(e.name.lower().endswith((".dll", ".pak", ".pck", ".dat", ".arc", ".bin")) for e in _entries(d)):
+        return None
+    return exe
+
+
 def sa_cached_detect(d):
     return by_mtime("sa:" + d, [d], lambda: sa_detect(d))
 
 
-def scan_standalone(known, extra=()):
+def scan_standalone(known, extra=(), auto=True):
     """Games with no launcher: portable or self-installed. `known` = folders other launchers already claimed."""
     known = {os.path.normcase(os.path.normpath(k)).rstrip("\\/") for k in known if k}
     out, taken = [], set()
@@ -711,6 +733,14 @@ def scan_standalone(known, extra=()):
     def claimed(p):
         p = os.path.normcase(os.path.normpath(p)).rstrip("\\/")
         return p in known or p in taken or any(p.startswith(k + os.sep) or k.startswith(p + os.sep) for k in known | taken)
+
+    def inside_claimed(p):   # this folder is, or sits inside, a game we already have
+        p = os.path.normcase(os.path.normpath(p)).rstrip("\\/")
+        return p in known or p in taken or any(p.startswith(k + os.sep) for k in known | taken)
+
+    def add(d, hit, name=None):
+        out.append(sa_game(d, hit, name))
+        taken.add(os.path.normcase(os.path.normpath(d)).rstrip("\\/"))
 
     def consider(d, name=None):
         if claimed(d):
@@ -723,19 +753,50 @@ def scan_standalone(known, extra=()):
         return True
 
     roots = []
-    for letter in string.ascii_uppercase:
+    for letter in (string.ascii_uppercase if auto else ""):
         drive = f"{letter}:\\"
         if os.path.exists(drive):
             roots += [os.path.join(drive, n) for n in SA_ROOT_NAMES if os.path.isdir(os.path.join(drive, n))]
     local = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")
-    if os.path.isdir(local):
+    if auto and os.path.isdir(local):
         roots.append(local)
     user = [e for e in extra if os.path.isdir(e)]
     _sa_roots.clear()
     _sa_roots.update(r for r in roots + user if "program files" not in r.lower())
+    # Folders the user picked: look several levels down, and accept any folder with a real game .exe,
+    # since the user has told us this folder holds games.
+    budget = [4000]
+
+    def walk(d, depth):
+        if budget[0] <= 0 or inside_claimed(d):
+            return
+        budget[0] -= 1
+        holds_known = claimed(d)          # a launcher game sits somewhere below, so this folder isn't one game
+        if not holds_known:
+            hit = sa_cached_detect(d)
+            if hit and hit.get("exe"):
+                return add(d, hit)
+            if depth > 0:                 # never treat the picked folder itself as a single loose game
+                exe = loose_exe(d)
+                if exe:
+                    home, lvl = d, depth          # Game\bin\x64\game.exe belongs to "Game", not "x64"
+                    while os.path.basename(home).lower() in SA_GENERIC and lvl > 1 and not claimed(os.path.dirname(home)):
+                        home, lvl = os.path.dirname(home), lvl - 1
+                    return add(home, {"kind": "game", "exe": exe})
+        if depth >= 5:
+            return
+        for c in sorted(_entries(d), key=lambda e: e.name.lower())[:300]:
+            try:
+                is_dir = c.is_dir()
+            except OSError:
+                is_dir = False
+            if is_dir and not c.name.startswith(".") and not SA_SKIP.match(c.name) and not NOT_GAMES.search(c.name) \
+                    and c.name.lower() not in SA_JUNK_DIRS:
+                walk(c.path, depth + 1)
+
     for r in user:
-        consider(r)   # the folder itself might be a game
-    for r in roots + user:
+        walk(r, 0)
+    for r in roots:
         for c in _entries(r):
             if not c.is_dir() or SA_SKIP.match(c.name) or NOT_GAMES.search(c.name):
                 continue
@@ -1022,10 +1083,10 @@ def scan_all(custom, settings=None):
         if c.get("path") and os.path.exists(c["path"]):
             found.append(game(c["id"], c["name"], "Custom", c["path"], c.get("launch")))
             seen.add(os.path.normcase(os.path.normpath(c["path"])))
-    if _STANDALONE_ON[0]:
+    if _STANDALONE_ON[0] or settings.get("game_folders"):   # folders the user picked are always searched
         try:
             ids = {g["id"] for g in found}
-            for g in scan_standalone([g["path"] for g in found], settings.get("game_folders") or []):
+            for g in scan_standalone([g["path"] for g in found], settings.get("game_folders") or [], auto=_STANDALONE_ON[0]):
                 if g["id"] not in ids:
                     found.append(g)
         except Exception as e:
