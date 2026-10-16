@@ -65,9 +65,9 @@ DATA_FILE = os.path.join(DATA_DIR, "library.json")
 ART_DIR = os.path.join(DATA_DIR, "covers")
 UA = "GameHub/1.0 (personal game library app)"
 ART_VERSION = 2   # bump to re-fetch art (v2 added hero banners + logos)
-VERSION = "0.026"
+VERSION = "0.027"
 DEFAULT_UPDATE_URL = __import__("base64").b64decode("aHR0cHM6Ly9naXRodWIuY29tL1NlbnRyYWwtSHViL2dhbWUtaHViLXJlbGVhc2VzL2Jsb2IvbWFpbi9nYW1lX2h1Yi5weQ==").decode()
-WHATS_NEW = "Folders you add under games without a launcher are now searched several levels deep, so every game inside them is found."
+WHATS_NEW = "Better at finding Ren'Py games, and they now show their real title instead of the folder name."
 PID_FILE = os.path.join(DATA_DIR, "running.pid")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APPDATA), "Programs", "Game Hub")
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\GameHub"
@@ -619,8 +619,8 @@ def sa_detect(d):
         return {"kind": "unity", "exe": best_exe(d, [x[:-5] + ".exe" for x in data_dirs])}
     if "data.win" in low:
         return {"kind": "gamemaker", "exe": best_exe(d)}
-    if "renpy" in dirs and "game" in dirs:
-        return {"kind": "renpy", "exe": best_exe(d)}
+    if "game" in dirs and ("renpy" in dirs or any(e.name.lower().endswith((".rpa", ".rpyc")) for e in _entries(low["game"].path))):
+        return renpy_hit(d, low)
     if os.path.isfile(os.path.join(d, "www", "js", "rpg_core.js")) or os.path.isfile(os.path.join(d, "js", "rmmz_core.js")) \
             or ("game.ini" in low and any(n.startswith("rgss") for n in low)):
         return {"kind": "rpgmaker", "exe": best_exe(d, ["Game.exe", "nw.exe"])}
@@ -646,6 +646,25 @@ def sa_detect(d):
                 if SA_DLLS & names:
                     return {"kind": "game", "exe": best_exe(dd)}
     return None
+
+
+def renpy_hit(d, low):
+    """A Ren'Py game: the .exe sits next to a .py of the same name; the real title is in game/options.rpy if it shipped."""
+    stems = [os.path.splitext(n)[0] for n in low if n.endswith(".py")]
+    exe = best_exe(d, [low[s + ".exe"].name for s in stems if s + ".exe" in low]) \
+        or best_exe(d, [n for n in low if n.endswith(".exe") and not n.endswith("-32.exe")])
+    if exe and exe.lower().endswith("-32.exe") and os.path.isfile(exe[:-7] + ".exe"):
+        exe = exe[:-7] + ".exe"
+    name = None
+    try:
+        with open(os.path.join(d, low["game"].name, "options.rpy"), encoding="utf-8", errors="ignore") as f:
+            m = re.search(r'^\s*define\s+config\.name\s*=\s*_?\(?\s*(["\'])(.+?)\1', f.read(), re.M)
+            name = m and m.group(2).strip()
+    except OSError:
+        pass
+    if not name and exe:
+        name = pretty_folder(os.path.splitext(os.path.basename(exe))[0])
+    return {"kind": "renpy", "exe": exe, "name": name or None}
 
 
 def exe_product_name(path):
@@ -684,6 +703,7 @@ def exe_product_name(path):
 
 def pretty_folder(name):
     n = re.sub(r"(?i)[ _\-.]*(v?\d+(\.\d+)+[a-z]?|win(32|64)|x64|x86|portable|drm[ _-]?free|gog|repack)(?=$|[ _\-.])", "", name)
+    n = re.sub(r"(?i)[ _\-.]+(pc|win|windows|all|market|steam|itch)$", "", n)
     n = re.sub(r"[_\-.]+", " ", n)
     n = re.sub(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|(?<=[A-Za-z])(?=\d)", " ", n)
     return re.sub(r"\s+", " ", n).strip() or name
