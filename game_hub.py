@@ -65,9 +65,9 @@ DATA_FILE = os.path.join(DATA_DIR, "library.json")
 ART_DIR = os.path.join(DATA_DIR, "covers")
 UA = "GameHub/1.0 (personal game library app)"
 ART_VERSION = 2   # bump to re-fetch art (v2 added hero banners + logos)
-VERSION = "0.027"
+VERSION = "0.028"
 DEFAULT_UPDATE_URL = __import__("base64").b64decode("aHR0cHM6Ly9naXRodWIuY29tL1NlbnRyYWwtSHViL2dhbWUtaHViLXJlbGVhc2VzL2Jsb2IvbWFpbi9nYW1lX2h1Yi5weQ==").decode()
-WHATS_NEW = "Better at finding Ren'Py games, and they now show their real title instead of the folder name."
+WHATS_NEW = "With Show hidden games turned on, hidden games now appear in All games and every other list, marked Hidden."
 PID_FILE = os.path.join(DATA_DIR, "running.pid")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APPDATA), "Programs", "Game Hub")
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\GameHub"
@@ -3018,6 +3018,8 @@ tr.row .more{opacity:.5}
 .hdot{width:26px;height:4px;border-radius:4px;border:0;padding:0;background:rgba(255,255,255,.28);cursor:pointer;transition:width .25s,background .25s}
 .hdot:hover{background:rgba(255,255,255,.55)}
 .hdot.on{width:46px;background:#fff}
+.hidtag{position:absolute;left:9px;bottom:9px;z-index:2;display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:3px 9px 3px 7px;border-radius:99px;background:rgba(10,12,18,.86);color:rgba(255,255,255,.8);border:1px solid rgba(255,255,255,.12)}
+.hidtag svg{width:12px;height:12px}
 /* personality */
 .title .greet{display:block;font-family:"Segoe UI Variable Text","Segoe UI",sans-serif;font-stretch:normal;font-size:13px;font-weight:500;color:rgba(255,255,255,.55);letter-spacing:0;text-shadow:none;margin-top:2px}
 .title .greet b{color:#fff;font-weight:600}
@@ -3174,7 +3176,7 @@ function sourceNote(g){
 function visible(){
   const {k,v}=S.view, q=S.q.trim().toLowerCase();
   const list=(k==='uninstalled'?(S.data.uninstalled||[]):k==='hidden'?allGames():S.data.games).filter(g=>{
-    if((k==='hidden')!==!!g.hidden) return false;
+    if(k==='hidden'?!g.hidden:(g.hidden&&!S.data.settings.show_hidden)) return false;   // "Show hidden games" puts them back in every list
     if(k==='fav'&&!g.fav) return false;
     if(k==='updates'&&!g.update) return false;
     if(k==='recent'&&!g.last&&!g.playing) return false;
@@ -3198,7 +3200,7 @@ function navItem(id, icon, label, n, extra=''){
   return `<div class="nav ${on?'active':''}" data-nav="${esc(id)}">${icon}<span>${esc(label)}</span>${extra}<span class="n">${n}</span></div>`; }
 
 function renderSide(){
-  const gs=S.data.games, vis=gs.filter(g=>!g.hidden), counts={};
+  const gs=S.data.games, showH=!!S.data.settings.show_hidden, vis=gs.filter(g=>showH||!g.hidden), counts={};
   vis.forEach(g=>counts[g.launcher]=(counts[g.launcher]||0)+1);
   let h=`<div class="brand"><div class="logo"><svg viewBox="0 0 24 24"><polygon points="7 4 20 12 7 20"/></svg></div>Game Hub</div>`;
   h+=navItem('all',ic('pad'),'Home','');
@@ -3212,7 +3214,7 @@ function renderSide(){
   if(S.data.collections.length){ h+='<div class="sec">Collections</div>';
     S.data.collections.forEach(c=>h+=navItem('coll|'+c,ic('layers'),c,vis.filter(g=>g.collection===c).length)); }
   const nh=S.data.settings.show_hidden?allGames().filter(g=>g.hidden).length:0;
-  const nun=(S.data.uninstalled||[]).filter(g=>!g.hidden).length;
+  const nun=(S.data.uninstalled||[]).filter(g=>showH||!g.hidden).length;
   if(nh||nun){ h+='<div class="sec">Other</div>';
     if(nun) h+=navItem('uninstalled',ic('archive'),'Uninstalled',nun);
     if(nh) h+=navItem('hidden',ic('eyeoff'),'Hidden',nh); }
@@ -3263,7 +3265,7 @@ function card(g){
   return `<div class="card ${g.installed===false?'off':''}" data-open="${esc(g.id)}">
     <div class="cover" data-cover="${esc(g.id)}">${tile(g)}
       ${g.playing?'<span class="live"><i></i>Playing</span>':''}${updBadge(g)}${starBtn(g)}
-      ${g.installed===false?'<span class="noinst">Not installed</span>':''}${actionBtn(g)}</div>
+      ${g.installed===false?'<span class="noinst">Not installed</span>':''}${g.hidden?`<span class="hidtag">${ic('eyeoff')}Hidden</span>`:''}${actionBtn(g)}</div>
     <div class="meta"><div class="nrow"><div class="name" title="${esc(g.name)}">${esc(g.name)}</div>${moreBtn(g)}</div>
       <div class="sub"><span class="dot" style="background:${lc(g.launcher)}"></span>${esc(g.launcher)}${playLabel(g)?`<span class="sep">·</span>${playLabel(g)}`:''}</div></div></div>`; }
 
@@ -3272,7 +3274,7 @@ function wcard(g, info='ago'){
     : `<span class="lchip"><span class="dot" style="background:${lc(g.launcher)}"></span>${esc(g.launcher)}${playLabel(g)?' · '+playLabel(g):''}</span>`;
   return `<div class="wcard" data-open="${esc(g.id)}">
     <div class="cover wide" data-cover="${esc(g.id)}">${tile(g)}${g.playing?'<span class="live"><i></i>Playing</span>':''}${updBadge(g)}${starBtn(g)}
-      ${g.installed===false?'<span class="noinst">Not installed</span>':''}${actionBtn(g)}</div>
+      ${g.installed===false?'<span class="noinst">Not installed</span>':''}${g.hidden?`<span class="hidtag">${ic('eyeoff')}Hidden</span>`:''}${actionBtn(g)}</div>
     <div class="wmeta"><b>${esc(g.name)}</b><span class="wr"><span style="white-space:nowrap">${right}</span>${moreBtn(g)}</span></div></div>`; }
 
 function slider(title, nav, count, items, cls=''){
