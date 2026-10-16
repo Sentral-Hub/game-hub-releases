@@ -63,9 +63,9 @@ DATA_FILE = os.path.join(DATA_DIR, "library.json")
 ART_DIR = os.path.join(DATA_DIR, "covers")
 UA = "GameHub/1.0 (personal game library app)"
 ART_VERSION = 2   # bump to re-fetch art (v2 added hero banners + logos)
-VERSION = "1.9"
+VERSION = "0.019"
 DEFAULT_UPDATE_URL = __import__("base64").b64decode("aHR0cHM6Ly9naXRodWIuY29tL1NlbnRyYWwtSHViL2dhbWUtaHViLXJlbGVhc2VzL2Jsb2IvbWFpbi9nYW1lX2h1Yi5weQ==").decode()
-WHATS_NEW = "Behind-the-scenes update improvements."
+WHATS_NEW = "New version numbering: 0.019 onwards, until version 1."
 PID_FILE = os.path.join(DATA_DIR, "running.pid")
 INSTALL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", APPDATA), "Programs", "Game Hub")
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\GameHub"
@@ -4145,10 +4145,16 @@ _NEW_RE = re.compile(r'^WHATS_NEW\s*=\s*"((?:\\.|[^"\\])*)"', re.M)
 
 
 def parse_version(v):
+    """Comparable version. Numbering is 0.019, 0.020, ... (three digits) until 1.0.0.
+    The early builds were numbered 1.0-1.9; those count as older than 0.019."""
+    parts = str(v).split(".")
     try:
-        return tuple(int(x) for x in str(v).split("."))
+        nums = tuple(int(x) for x in parts)
     except ValueError:
         return (0,)
+    if len(parts) == 2 and nums[0] == 1 and len(parts[1]) == 1:   # old 1.0-1.9 numbering
+        return (0, nums[1])
+    return nums
 
 
 def read_header(text):
